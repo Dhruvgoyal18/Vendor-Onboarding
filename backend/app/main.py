@@ -1,0 +1,100 @@
+import logging
+from contextlib import asynccontextmanager
+from datetime import datetime
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import get_settings
+from app.database import Base, engine, get_db
+from app.api.submissions import router as submissions_router
+from app.api.dashboard import router as dashboard_router
+
+settings = get_settings()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(name)s | %(levelname)s | %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("Starting Vendor Onboarding API...")
+    # Create all tables on startup
+    Base.metadata.create_all(bind=engine)
+    logger.info("Database tables created/verified")
+
+    # Recovery: mark orphaned 'processing' vendors as 'error'
+    # These are submissions where the background task was lost (server restart).
+    try:
+        from app.models import Vendor, PipelineStageLog, SubmissionStatus, StageStatus
+        from sqlalchemy.orm import Session
+        db: Session = next(get_db())
+        stuck = db.query(Vendor).filter(Vendor.status == SubmissionStatus.processing).all()
+        recovered = 0
+        for v in stuck:
+            # Check if ANY stage has started running
+            running_or_done = (
+                db.query(PipelineStageLog)
+                .filter(
+                    PipelineStageLog.vendor_id == v.id,
+                    PipelineStageLog.status.in_([StageStatus.running, StageStatus.completed])
+                )
+                .count()
+            )
+            if running_or_done == 0:
+                # Fully orphaned — nothing ever started
+                v.status = SubmissionStatus.error
+                v.updated_at = datetime.utcnow()
+                recovered += 1
+        if recovered:
+            db.commit()
+            logger.warning(f"Recovered {recovered} orphaned vendor(s) → marked as error")
+        db.close()
+    except Exception as e:
+        logger.error(f"Startup recovery failed (non-fatal): {e}")
+
+    yield
+    logger.info("Shutting down Vendor Onboarding API...")
+
+
+
+app = FastAPI(
+    title="Vendor Onboarding API",
+    description="AI-powered vendor onboarding and procurement validation system",
+    version="1.0.0",
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS configuration
+origins = [
+    settings.frontend_url,
+    "http://localhost:3000",
+    "http://localhost:3001",
+    "https://*.vercel.app",
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Include routers
+app.include_router(submissions_router)
+app.include_router(dashboard_router)
+
+
+@app.get("/")
+def health():
+    return {"status": "healthy", "service": "Vendor Onboarding API", "version": "1.0.0"}
+
+
+@app.get("/health")
+def health_check():
+    return {"status": "ok"}
