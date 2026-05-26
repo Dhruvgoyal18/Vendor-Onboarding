@@ -301,7 +301,8 @@ def _check_completeness_generic(
 
 def check_consistency(form_data: Dict[str, Any], extracted_docs: Dict[str, Dict]) -> List[Dict[str, Any]]:
     """
-    Claude-powered semantic consistency check between form data and extracted documents.
+    LLM-powered semantic consistency check between form data and extracted documents.
+    Includes incorporation date, address/state, and email domain checks.
     """
     if not extracted_docs:
         return [{
@@ -311,20 +312,30 @@ def check_consistency(form_data: Dict[str, Any], extracted_docs: Dict[str, Dict]
             "confidence": 0.0,
         }]
 
+    # Strip internal metadata fields from docs before sending to LLM
+    clean_docs = {
+        k: {fk: fv for fk, fv in v.items() if not fk.startswith("_")}
+        for k, v in extracted_docs.items()
+        if isinstance(v, dict)
+    }
+
     user_message = f"""Compare these vendor data objects for consistency:
 
 FORM DATA (submitted by vendor):
 {json.dumps(form_data, indent=2)}
 
 EXTRACTED DOCUMENT DATA:
-{json.dumps(extracted_docs, indent=2)}
+{json.dumps(clean_docs, indent=2)}
 
 Compare these fields if data is available from both sources:
 1. Company/entity name (form: company_name vs documents: entity_name)
-2. Registration number
-3. Tax ID
-4. Bank account name (form: bank_account_name vs bank doc: account_name)
-5. Country
+2. Registration number / CIN
+3. Tax ID / GSTIN / PAN
+4. Bank account name (form: bank_account_name vs bank doc: account_name/account_holder_name)
+5. Country / registered state
+6. Incorporation date (form: incorporation_date vs COI: incorporation_date)
+7. Address/state consistency (if any document shows an address, does the state match form registered_state?)
+8. Email domain plausibility (form: contact_email domain vs company name)
 
 Return a JSON array of comparison results."""
 
@@ -345,14 +356,42 @@ Return a JSON array of comparison results."""
         }]
 
 
-def check_credibility(vendor_data: Dict[str, Any]) -> Dict[str, Any]:
+def check_credibility(vendor_data: Dict[str, Any], all_checks: Optional[List[Dict]] = None) -> Dict[str, Any]:
     """
-    Claude-powered fraud/risk signal analysis.
+    LLM fraud/risk signal analysis. Receives pipeline_checks from previous stages
+    so it can factor in how many deterministic checks already failed.
     """
+    # Summarise previous check failures for the LLM context
+    check_summary: Dict[str, Any] = {}
+    if all_checks:
+        fails = [r for r in all_checks if r.get("status") in ("fail", "missing")]
+        warnings = [r for r in all_checks if r.get("status") == "warning"]
+        check_summary = {
+            "total_checks": len(all_checks),
+            "failed_checks": len(fails),
+            "warning_checks": len(warnings),
+            "failed_check_names": [r.get("check") for r in fails[:10]],  # top 10
+        }
+
+    # Strip internal metadata from vendor_data docs
+    clean_vendor = {}
+    for k, v in vendor_data.items():
+        if k == "docs" and isinstance(v, dict):
+            clean_vendor[k] = {
+                dk: {fk: fv for fk, fv in dv.items() if not fk.startswith("_")}
+                for dk, dv in v.items()
+                if isinstance(dv, dict)
+            }
+        else:
+            clean_vendor[k] = v
+
     user_message = f"""Analyze this vendor submission for fraud signals and risk:
 
 VENDOR DATA:
-{json.dumps(vendor_data, indent=2)}
+{json.dumps(clean_vendor, indent=2)}
+
+PIPELINE CHECK SUMMARY (from earlier deterministic stages):
+{json.dumps(check_summary, indent=2)}
 
 Provide a comprehensive risk assessment."""
 

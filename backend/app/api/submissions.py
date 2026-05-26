@@ -10,17 +10,18 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, B
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.auth import require_vendor
+from app.auth import require_vendor, require_admin
 from app.database import get_db
 from sqlalchemy import or_
 from app.models import (
-    Vendor, Document, PipelineStageLog, EmailLog,
+    Vendor, Document, PipelineStageLog, EmailLog, AuditEvent,
     SubmissionStatus, PipelineStage, StageStatus
 )
 from app.schemas import (
     SubmissionFormData, VendorDetailOut, SubmissionResponse,
-    EmailLogOut, VendorVersionOut
+    EmailLogOut, VendorVersionOut, OverrideRequest
 )
+from app.services.email_service import send_approval_email, send_rejection_email
 from app.services.pipeline import run_pipeline, _generate_run_id, PIPELINE_STAGES
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,111 @@ def retry_submission(
     background_tasks.add_task(_run_pipeline_sync, vendor.id, {})
 
     return {"run_id": run_id, "message": "Pipeline re-triggered successfully"}
+
+
+@router.get("/mine")
+def get_my_submissions(
+    db: Session = Depends(get_db),
+    vendor_payload: dict = Depends(require_vendor),
+):
+    """Get all submissions for the authenticated vendor's email."""
+    email = vendor_payload["sub"]
+    vendors = (
+        db.query(Vendor)
+        .filter(Vendor.contact_email == email)
+        .order_by(Vendor.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "run_id": v.run_id,
+            "company_name": v.company_name,
+            "country": v.country,
+            "status": v.status,
+            "risk_level": v.risk_level,
+            "created_at": v.created_at,
+            "decided_at": v.decided_at,
+            "version_number": v.version_number,
+        }
+        for v in vendors
+    ]
+
+
+@router.post("/{run_id}/override", tags=["admin"])
+def override_submission(
+    run_id: str,
+    body: OverrideRequest,
+    db: Session = Depends(get_db),
+    admin_payload: dict = Depends(require_admin),
+):
+    """
+    Admin override: force-set a submission to approved or rejected.
+    Writes an audit event, flips vendor status, and sends the appropriate email.
+    """
+    if body.decision not in ("approved", "rejected"):
+        raise HTTPException(400, "decision must be 'approved' or 'rejected'")
+    if not body.reason or not body.reason.strip():
+        raise HTTPException(400, "reason is required")
+
+    vendor = db.query(Vendor).filter(Vendor.run_id == run_id).first()
+    if not vendor:
+        raise HTTPException(404, f"Submission '{run_id}' not found")
+    if vendor.status == SubmissionStatus.processing:
+        raise HTTPException(409, "Cannot override a submission that is still processing")
+
+    prev_status = vendor.status
+    vendor.status = SubmissionStatus(body.decision)
+    vendor.override_by = admin_payload["sub"]
+    vendor.override_at = datetime.utcnow()
+    vendor.override_reason = body.reason.strip()
+    vendor.decided_at = datetime.utcnow()
+    vendor.updated_at = datetime.utcnow()
+
+    db.add(AuditEvent(
+        vendor_id=vendor.id,
+        event_type="override",
+        actor=admin_payload["sub"],
+        actor_role="admin",
+        payload={
+            "prev_status": str(prev_status),
+            "new_status": body.decision,
+            "reason": body.reason.strip(),
+        },
+    ))
+    db.commit()
+
+    # Send email
+    if body.decision == "approved" and vendor.contact_email:
+        success = send_approval_email(vendor.contact_email, vendor.company_name)
+        db.add(EmailLog(
+            vendor_id=vendor.id,
+            recipient=vendor.contact_email,
+            subject=f"Vendor Application Approved — {vendor.company_name}",
+            body=f"Override approved by {admin_payload['sub']}. Reason: {body.reason}",
+            email_type="approval",
+            success=success,
+        ))
+        db.commit()
+    elif body.decision == "rejected" and vendor.contact_email:
+        from app.services.decision import generate_rejection_email
+        email_body = generate_rejection_email(vendor.company_name)
+        success = send_rejection_email(vendor.contact_email, vendor.company_name, email_body)
+        db.add(EmailLog(
+            vendor_id=vendor.id,
+            recipient=vendor.contact_email,
+            subject=f"Vendor Application Update — {vendor.company_name}",
+            body=email_body,
+            email_type="rejection_neutral",
+            success=success,
+        ))
+        db.commit()
+
+    return {
+        "run_id": run_id,
+        "status": body.decision,
+        "override_by": admin_payload["sub"],
+        "override_at": vendor.override_at.isoformat(),
+    }
 
 
 @router.get("/{run_id}", response_model=VendorDetailOut)
@@ -567,31 +673,3 @@ async def sse_events(run_id: str, db: Session = Depends(get_db)):
             "X-Accel-Buffering": "no",
         },
     )
-
-
-@router.get("/mine")
-def get_my_submissions(
-    db: Session = Depends(get_db),
-    vendor_payload: dict = Depends(require_vendor),
-):
-    """Get all submissions for the authenticated vendor's email."""
-    email = vendor_payload["sub"]
-    vendors = (
-        db.query(Vendor)
-        .filter(Vendor.contact_email == email)
-        .order_by(Vendor.created_at.desc())
-        .all()
-    )
-    return [
-        {
-            "run_id": v.run_id,
-            "company_name": v.company_name,
-            "country": v.country,
-            "status": v.status,
-            "risk_level": v.risk_level,
-            "created_at": v.created_at,
-            "decided_at": v.decided_at,
-            "version_number": v.version_number,
-        }
-        for v in vendors
-    ]

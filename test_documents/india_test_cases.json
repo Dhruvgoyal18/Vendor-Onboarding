@@ -1,0 +1,163 @@
+{
+  "tc1_prism_approved": {
+    "_scenario": "APPROVED \u2014 clean submission, all checks pass",
+    "_expected_status": "approved",
+    "_expected_reason_codes": [],
+    "_failing_checks": [],
+    "company_name": "PRISM SOFTWARE SOLUTIONS PRIVATE LIMITED",
+    "country": "IN",
+    "incorporation_date": "2018-03-15",
+    "contact_name": "Arjun Sharma",
+    "contact_email": "arjun.sharma@prismsoftware.in",
+    "cin_number": "U72200KA2018PTC098765",
+    "pan_number": "AABCP1234I",
+    "gstin_number": "29AABCP1234I1ZK",
+    "ifsc_code": "HDFC0001234",
+    "account_type": "Current Account",
+    "registered_state": "Karnataka",
+    "bank_account_name": "PRISM SOFTWARE SOLUTIONS PRIVATE LIMITED",
+    "account_number": "50200012345678",
+    "bank_name": "HDFC Bank",
+    "bank_country": "IN",
+    "_docs": {
+      "coi": "tc1_prism_coi.pdf",
+      "pan_gstin": "tc1_prism_pan_gstin.pdf",
+      "bank_letter": "tc1_prism_bank_letter.pdf"
+    }
+  },
+  "tc2_brightwave_pending_individual_pan": {
+    "_scenario": "PENDING \u2014 Individual PAN (4th char P) submitted for a company",
+    "_expected_status": "pending",
+    "_expected_reason_codes": [
+      "PAN_ENTITY_INDIVIDUAL"
+    ],
+    "_failing_checks": [
+      "pan_entity_type"
+    ],
+    "_severity_score": 14,
+    "company_name": "BRIGHTWAVE LOGISTICS PRIVATE LIMITED",
+    "country": "IN",
+    "incorporation_date": "2021-09-10",
+    "contact_name": "Kavita Menon",
+    "contact_email": "kavita@brightwavelogistics.in",
+    "cin_number": "U63000MH2021PTC346789",
+    "pan_number": "AABPB5678Q",
+    "gstin_number": "27AABPB5678Q1ZJ",
+    "ifsc_code": "ICIC0004567",
+    "account_type": "Current Account",
+    "registered_state": "Maharashtra",
+    "bank_account_name": "BRIGHTWAVE LOGISTICS PRIVATE LIMITED",
+    "account_number": "001201234567890",
+    "bank_name": "ICICI Bank",
+    "bank_country": "IN",
+    "_docs": {
+      "coi": "tc2_brightwave_coi.pdf",
+      "pan_gstin": "tc2_brightwave_pan_gstin.pdf",
+      "bank_letter": "tc2_brightwave_bank_letter.pdf"
+    }
+  },
+  "tc3_kiran_pending_gstin_state_mismatch": {
+    "_scenario": "PENDING \u2014 GSTIN state code 09 (UP) \u2260 registered state Delhi (07)",
+    "_expected_status": "pending",
+    "_expected_reason_codes": [
+      "GSTIN_STATE_MISMATCH"
+    ],
+    "_failing_checks": [
+      "gstin_state_vs_registered_state"
+    ],
+    "_severity_score": 14,
+    "company_name": "KIRAN HEALTH SYSTEMS PRIVATE LIMITED",
+    "country": "IN",
+    "incorporation_date": "2019-06-22",
+    "contact_name": "Dr. Rajiv Kiran",
+    "contact_email": "rajiv@kiranhealthsystems.in",
+    "cin_number": "U85100DL2019PTC352001",
+    "pan_number": "AABCK5678C",
+    "gstin_number": "09AABCK5678C1ZJ",
+    "ifsc_code": "SBIN0011567",
+    "account_type": "Current Account",
+    "registered_state": "Delhi",
+    "bank_account_name": "KIRAN HEALTH SYSTEMS PRIVATE LIMITED",
+    "account_number": "30012345678901",
+    "bank_name": "State Bank of India",
+    "bank_country": "IN",
+    "_docs": {
+      "coi": "tc3_kiran_coi.pdf",
+      "pan_gstin": "tc3_kiran_pan_gstin.pdf",
+      "bank_letter": "tc3_kiran_bank_letter.pdf"
+    }
+  },
+  "tc4_falcon_rejected_multiple_fraud": {
+    "_scenario": "REJECTED \u2014 GSTIN PAN mismatch + bank account belongs to different entity (VIKAS ENTERPRISES)",
+    "_expected_status": "rejected",
+    "_expected_reason_codes": [
+      "GSTIN_PAN_MISMATCH",
+      "COMPANY_NAME_BANK_MISMATCH",
+      "COI_VS_BANK_NAME_MISMATCH",
+      "PAN_VS_BANK_NAME_MISMATCH"
+    ],
+    "_failing_checks": [
+      "gstin_pan_match",
+      "company_name_vs_bank_doc",
+      "coi_vs_bank_name",
+      "pan_vs_bank_name",
+      "gstin_embedded_pan_vs_pan_doc"
+    ],
+    "_severity_score": 70,
+    "company_name": "FALCON DYNAMICS PRIVATE LIMITED",
+    "country": "IN",
+    "incorporation_date": "2020-01-10",
+    "contact_name": "Suresh Kapoor",
+    "contact_email": "suresh@falcondynamics.in",
+    "cin_number": "U62090DL2020PTC298765",
+    "pan_number": "AABCF3691B",
+    "gstin_number": "07AABCX9999Q1ZK",
+    "ifsc_code": "UTIB0001234",
+    "account_type": "Current Account",
+    "registered_state": "Delhi",
+    "bank_account_name": "VIKAS ENTERPRISES",
+    "account_number": "917010012345678",
+    "bank_name": "Axis Bank",
+    "bank_country": "IN",
+    "_docs": {
+      "coi": "tc4_falcon_coi.pdf",
+      "pan_gstin": "tc4_falcon_pan_gstin.pdf",
+      "bank_letter": "tc4_falcon_bank_letter.pdf"
+    }
+  },
+  "tc5_krishna_rejected_foreign_bank": {
+    "_scenario": "REJECTED \u2014 GSTIN state+PAN double mismatch + foreign Singapore bank account for Indian company",
+    "_expected_status": "rejected",
+    "_expected_reason_codes": [
+      "GSTIN_PAN_MISMATCH",
+      "GSTIN_STATE_MISMATCH",
+      "FOREIGN_BANK_ACCOUNT"
+    ],
+    "_failing_checks": [
+      "gstin_pan_match",
+      "gstin_state_vs_registered_state",
+      "gstin_embedded_pan_vs_pan_doc"
+    ],
+    "_severity_score": 42,
+    "company_name": "SHREE KRISHNA EXPORTS PRIVATE LIMITED",
+    "country": "IN",
+    "incorporation_date": "2022-02-15",
+    "contact_name": "Krishnaswamy Iyer",
+    "contact_email": "krishnaswamy.iyer@shreekrishna.com",
+    "cin_number": "U51909TN2022PTC401234",
+    "pan_number": "AABCS4523U",
+    "gstin_number": "07AABCX5555P1ZM",
+    "ifsc_code": "",
+    "account_type": "Current Account",
+    "registered_state": "Tamil Nadu",
+    "bank_account_name": "SHREE KRISHNA EXPORTS PRIVATE LIMITED",
+    "account_number": "0720123456789",
+    "bank_name": "DBS Bank Singapore",
+    "bank_country": "SG",
+    "_docs": {
+      "coi": "tc5_krishna_coi.pdf",
+      "pan_gstin": "tc5_krishna_pan_gstin.pdf",
+      "bank_letter": "tc5_krishna_bank_letter.pdf"
+    }
+  }
+}
