@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc
 
+from app.auth import require_admin
 from app.database import get_db
 from app.models import Vendor, SubmissionStatus
 from app.schemas import DashboardStats, PaginatedVendors, VendorOut
@@ -16,7 +17,7 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 @router.get("/stats", response_model=DashboardStats)
-def get_stats(db: Session = Depends(get_db)):
+def get_stats(db: Session = Depends(get_db), _=Depends(require_admin)):
     """Get dashboard summary statistics."""
     counts = (
         db.query(Vendor.status, func.count(Vendor.id).label("count"))
@@ -44,6 +45,7 @@ def get_history(
     status: Optional[str] = Query(None),
     search: Optional[str] = Query(None),
     db: Session = Depends(get_db),
+    _=Depends(require_admin),
 ):
     """Get paginated vendor submission history with optional filters."""
     query = db.query(Vendor)

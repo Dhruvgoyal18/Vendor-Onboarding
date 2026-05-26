@@ -15,6 +15,11 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
     environment: str = "development"
 
+    # Auth
+    jwt_secret: str = "change-me-in-production-use-a-long-random-string"
+    admin_username: str = "admin"
+    admin_password: str = "VendorAI@2024"
+
     class Config:
         env_file = ".env"
         case_sensitive = False

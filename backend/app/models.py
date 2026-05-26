@@ -151,6 +151,18 @@ class PipelineStageLog(Base):
     vendor = relationship("Vendor", back_populates="pipeline_stages")
 
 
+class RefreshToken(Base):
+    __tablename__ = "refresh_tokens"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    token_hash = Column(String, unique=True, nullable=False, index=True)
+    role = Column(String, nullable=False)       # "admin" or "vendor"
+    subject = Column(String, nullable=False)    # username or email
+    expires_at = Column(DateTime, nullable=False)
+    revoked = Column(Boolean, default=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
 class EmailLog(Base):
     __tablename__ = "email_logs"
 

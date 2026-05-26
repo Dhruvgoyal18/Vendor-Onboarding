@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile, B
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.auth import require_vendor
 from app.database import get_db
 from sqlalchemy import or_
 from app.models import (
@@ -566,3 +567,31 @@ async def sse_events(run_id: str, db: Session = Depends(get_db)):
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@router.get("/mine")
+def get_my_submissions(
+    db: Session = Depends(get_db),
+    vendor_payload: dict = Depends(require_vendor),
+):
+    """Get all submissions for the authenticated vendor's email."""
+    email = vendor_payload["sub"]
+    vendors = (
+        db.query(Vendor)
+        .filter(Vendor.contact_email == email)
+        .order_by(Vendor.created_at.desc())
+        .all()
+    )
+    return [
+        {
+            "run_id": v.run_id,
+            "company_name": v.company_name,
+            "country": v.country,
+            "status": v.status,
+            "risk_level": v.risk_level,
+            "created_at": v.created_at,
+            "decided_at": v.decided_at,
+            "version_number": v.version_number,
+        }
+        for v in vendors
+    ]

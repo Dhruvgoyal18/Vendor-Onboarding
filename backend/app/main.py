@@ -6,6 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
 from app.database import Base, engine, get_db
+from app.api.auth import router as auth_router
 from app.api.submissions import router as submissions_router
 from app.api.dashboard import router as dashboard_router
 
@@ -86,6 +87,7 @@ app.add_middleware(
 )
 
 # Include routers
+app.include_router(auth_router)
 app.include_router(submissions_router)
 app.include_router(dashboard_router)
 
