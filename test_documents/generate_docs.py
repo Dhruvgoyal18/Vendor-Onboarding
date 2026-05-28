@@ -259,6 +259,124 @@ def gen_tax_uk():
     print("Generated uk_vat_certificate.pdf")
 
 
+# ─── REJECTED CASE: GlobalTech Solutions (recently incorporated + foreign bank) ─
+# Triggers rejection: company is 2 months old (< 6 months) AND bank is in UAE
+# The credibility LLM will flag both as high-severity signals → risk_level = high → rejected
+
+def gen_coi_globaltech():
+    """GlobalTech Solutions: incorporated 2 months ago → recently incorporated flag."""
+    d = doc("rejected_coi.pdf")
+    story = [
+        Paragraph("MINISTRY OF CORPORATE AFFAIRS", ParagraphStyle("gov", parent=styles["Normal"], fontSize=10, alignment=TA_CENTER, textColor=colors.grey)),
+        Paragraph("Certificate of Incorporation", title_style),
+        Paragraph("(Under the Companies Act, 2013)", center),
+        Spacer(1, 8*mm),
+        HRFlowable(width="100%", thickness=1, color=colors.navy),
+        Spacer(1, 6*mm),
+        Paragraph("This is to certify that <b>GLOBALTECH SOLUTIONS PRIVATE LIMITED</b> is incorporated under the Companies Act, 2013 and the company is limited by shares.", normal),
+        Spacer(1, 6*mm),
+        kv_table([
+            ("Company Name", "GLOBALTECH SOLUTIONS PRIVATE LIMITED"),
+            ("CIN", "U74999DL2026PTC412001"),
+            ("Date of Incorporation", "20/03/2026"),      # 2 months ago
+            ("State of Incorporation", "Delhi"),
+            ("Registered Office", "201, Connaught Place, New Delhi - 110001"),
+            ("Type of Company", "Private Company Limited by Shares"),
+            ("Authorised Capital", "INR 1,00,000"),
+        ]),
+        Spacer(1, 10*mm),
+        Paragraph("Given under my hand at New Delhi, this Twentieth day of March, Two Thousand and Twenty-Six.", normal),
+        Spacer(1, 14*mm),
+        Paragraph("Sd/-", normal),
+        Paragraph("<b>Registrar of Companies, Delhi</b>", normal),
+        Paragraph("Ministry of Corporate Affairs", small),
+        Spacer(1, 6*mm),
+        HRFlowable(width="100%", thickness=0.5, color=colors.grey),
+        Paragraph("This document is digitally issued. Verify at mca.gov.in. CIN: U74999DL2026PTC412001", small),
+    ]
+    d.build(story)
+    print("Generated rejected_coi.pdf")
+
+
+def gen_pan_gstin_globaltech():
+    """GlobalTech Solutions PAN and GSTIN certificate."""
+    d = doc("rejected_pan_gstin.pdf")
+    story = [
+        Paragraph("INCOME TAX DEPARTMENT — GOVERNMENT OF INDIA", ParagraphStyle("gov", parent=styles["Normal"], fontSize=10, alignment=TA_CENTER, textColor=colors.grey)),
+        Paragraph("Permanent Account Number (PAN) Card", title_style),
+        Spacer(1, 4*mm),
+        HRFlowable(width="100%", thickness=1, color=colors.darkblue),
+        Spacer(1, 6*mm),
+        kv_table([
+            ("Name of Assessee", "GLOBALTECH SOLUTIONS PRIVATE LIMITED"),
+            ("PAN", "AABCG1234Q"),
+            ("Date of Birth / Incorporation", "20/03/2026"),
+            ("Father's / Founder's Name", "PRIYA MEHTA"),
+            ("Status", "COMPANY"),
+        ]),
+        Spacer(1, 10*mm),
+        HRFlowable(width="100%", thickness=0.5, color=colors.grey),
+        Spacer(1, 6*mm),
+        Paragraph("GST NETWORK (GSTN) — GOVERNMENT OF INDIA", ParagraphStyle("gov", parent=styles["Normal"], fontSize=10, alignment=TA_CENTER, textColor=colors.grey)),
+        Paragraph("GST Registration Certificate", h2),
+        Spacer(1, 4*mm),
+        kv_table([
+            ("Legal Name of Business", "GLOBALTECH SOLUTIONS PRIVATE LIMITED"),
+            ("GSTIN", "07AABCG1234Q1ZD"),
+            ("PAN", "AABCG1234Q"),
+            ("State", "Delhi"),
+            ("GST State Code", "07"),
+            ("Registration Type", "Regular"),
+            ("Date of Registration", "01/04/2026"),
+            ("Place of Business", "201, Connaught Place, New Delhi - 110001"),
+        ]),
+        Spacer(1, 10*mm),
+        Paragraph("Issued by GST Council. Verify at gst.gov.in using GSTIN: 07AABCG1234Q1ZD", small),
+    ]
+    d.build(story)
+    print("Generated rejected_pan_gstin.pdf")
+
+
+def gen_bank_letter_globaltech():
+    """GlobalTech bank letter: UAE bank account → foreign bank flag."""
+    d = doc("rejected_bank_letter.pdf")
+    story = [
+        Paragraph("EMIRATES NBD BANK P.J.S.C.", title_style),
+        Paragraph("Baniyas Road, Deira, Dubai, UAE — SWIFT: EBILAEAD", center),
+        Spacer(1, 4*mm),
+        HRFlowable(width="100%", thickness=1, color=colors.HexColor("#c8971b")),
+        Spacer(1, 6*mm),
+        Paragraph("<b>TO WHOMSOEVER IT MAY CONCERN</b>", center),
+        Paragraph("<b>BANK ACCOUNT CONFIRMATION LETTER</b>", ParagraphStyle("ch", parent=styles["Normal"], alignment=TA_CENTER, fontSize=13, fontName="Helvetica-Bold")),
+        Spacer(1, 6*mm),
+        Paragraph("This is to certify that the following bank account is maintained with Emirates NBD Bank P.J.S.C., Dubai Branch:", normal),
+        Spacer(1, 4*mm),
+        kv_table([
+            ("Account Holder Name", "GLOBALTECH SOLUTIONS PRIVATE LIMITED"),
+            ("Account Number", "1014844587001"),
+            ("Account Type", "Current Account"),
+            ("Bank Name", "Emirates NBD Bank P.J.S.C."),
+            ("Branch", "Deira Corporate, Dubai, UAE"),
+            ("IBAN", "AE070331234567890123456"),
+            ("SWIFT / BIC", "EBILAEAD"),
+            ("Currency", "AED"),
+            ("Date of Opening", "10/04/2026"),
+            ("Account Status", "Active"),
+        ]),
+        Spacer(1, 8*mm),
+        Paragraph("This letter is issued at the request of the account holder for vendor registration purposes.", normal),
+        Spacer(1, 14*mm),
+        Paragraph("Authorised Signatory", normal),
+        Paragraph("<b>Business Banking — Emirates NBD, Deira Branch</b>", normal),
+        Paragraph("Date: 15/05/2026", small),
+        Spacer(1, 6*mm),
+        HRFlowable(width="100%", thickness=0.5, color=colors.grey),
+        Paragraph("Emirates NBD Bank is licensed by the UAE Central Bank. This letter is valid for 90 days from date of issue.", small),
+    ]
+    d.build(story)
+    print("Generated rejected_bank_letter.pdf")
+
+
 if __name__ == "__main__":
     gen_coi_india()
     gen_pan_gstin_india()
@@ -266,4 +384,8 @@ if __name__ == "__main__":
     gen_registration_uk()
     gen_bank_letter_uk()
     gen_tax_uk()
+    # Rejected test case: recently incorporated + foreign (UAE) bank
+    gen_coi_globaltech()
+    gen_pan_gstin_globaltech()
+    gen_bank_letter_globaltech()
     print("\nAll documents generated in:", OUT)

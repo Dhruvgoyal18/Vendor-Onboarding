@@ -63,6 +63,36 @@ def send_rejection_email(
     )
 
 
+def _approval_email_body(vendor_name: str) -> str:
+    return f"""Dear {vendor_name},
+
+We are pleased to inform you that your vendor onboarding application has been reviewed and approved.
+
+Your company is now registered as an approved vendor in our system.
+
+What happens next:
+  1. Our procurement team will reach out to you within 2–3 business days to discuss next steps.
+  2. You will receive your vendor code and portal access credentials.
+  3. Please keep your submitted documents on file for future reference.
+
+If you have any questions, please contact our procurement team.
+
+Congratulations and welcome aboard!
+
+Best regards,
+Vendor Onboarding Team"""
+
+
+def send_approval_email(to: str, vendor_name: str) -> bool:
+    """Send approval confirmation email to vendor."""
+    return send_email(
+        to=to,
+        subject=f"Vendor Application Approved — {vendor_name}",
+        body=_approval_email_body(vendor_name),
+        email_type="approval",
+    )
+
+
 def send_ocr_failure_email(
     to: str,
     vendor_name: str,

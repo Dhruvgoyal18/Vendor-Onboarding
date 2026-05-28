@@ -32,6 +32,13 @@ class StageStatus(str, Enum):
     skipped = "skipped"
 
 
+# ─── Override ───────────────────────────────────────────────────────────────────
+
+class OverrideRequest(BaseModel):
+    decision: str   # "approved" or "rejected"
+    reason: str
+
+
 # ─── Submission ─────────────────────────────────────────────────────────────────
 
 class SubmissionFormData(BaseModel):

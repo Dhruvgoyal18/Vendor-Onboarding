@@ -18,21 +18,26 @@ import json
 from sqlalchemy.orm import Session
 
 from app.models import (
-    Vendor, Document, ValidationResult, PipelineStageLog, EmailLog,
+    Vendor, Document, ValidationResult, PipelineStageLog, EmailLog, AuditEvent,
     SubmissionStatus, PipelineStage, StageStatus
 )
 from app.schemas import SubmissionFormData
 from app.services.extractor import extract_document
 from app.services.validator import check_completeness, check_consistency, check_credibility
 from app.services.india_validator import run_india_format_checks, run_india_cross_doc_checks
+from app.services.external_api_service import run_external_verifications
 from app.services.decision import (
     make_decision,
     generate_decision_summary,
     generate_pending_email,
     generate_rejection_email,
 )
-from app.services.email_service import send_pending_email, send_rejection_email, send_ocr_failure_email
+from app.services.email_service import (
+    send_pending_email, send_rejection_email, send_approval_email, send_ocr_failure_email,
+    _approval_email_body,
+)
 from app.config import get_settings
+from app.services.storage_service import download_document
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -41,6 +46,7 @@ PIPELINE_STAGES = [
     PipelineStage.intake,
     PipelineStage.extract_fields,
     PipelineStage.format_check,
+    PipelineStage.external_verification,
     PipelineStage.extract_docs,
     PipelineStage.cross_doc_check,
     PipelineStage.merge,
@@ -122,7 +128,21 @@ async def run_pipeline(
     """
     run_id = vendor.run_id
     country = (vendor.country or "").upper()
+    pipeline_start = datetime.utcnow()
     logger.info(f"[{run_id}] Starting pipeline (country={country})")
+
+    # Set SLA due date (48 hours from creation) and write audit event
+    from datetime import timedelta
+    if not vendor.sla_due_at:
+        vendor.sla_due_at = (vendor.created_at or pipeline_start) + timedelta(hours=48)
+    db.add(AuditEvent(
+        vendor_id=vendor.id,
+        event_type="pipeline_started",
+        actor="system",
+        actor_role="system",
+        payload={"run_id": run_id, "country": country},
+    ))
+    db.commit()
 
     form_data = {
         "company_name": vendor.company_name,
@@ -154,11 +174,24 @@ async def run_pipeline(
         _update_stage(db, vendor, PipelineStage.intake, StageStatus.running, "Receiving submission")
         await asyncio.sleep(0.5)
 
-        # Duplicate detection
+        # Duplicate detection — company name, PAN, GSTIN, account+IFSC
+        dup_filters = [Vendor.company_name == vendor.company_name]
+        if vendor.pan_number:
+            dup_filters.append(Vendor.pan_number == vendor.pan_number)
+        if vendor.gstin_number:
+            dup_filters.append(Vendor.gstin_number == vendor.gstin_number)
+        if vendor.account_number and vendor.ifsc_code:
+            from sqlalchemy import and_
+            dup_filters.append(
+                and_(Vendor.account_number == vendor.account_number,
+                     Vendor.ifsc_code == vendor.ifsc_code)
+            )
+
+        from sqlalchemy import or_
         existing = (
             db.query(Vendor)
             .filter(
-                Vendor.company_name == vendor.company_name,
+                or_(*dup_filters),
                 Vendor.id != vendor.id,
                 Vendor.status.in_([SubmissionStatus.approved, SubmissionStatus.pending]),
             )
@@ -196,6 +229,28 @@ async def run_pipeline(
             _update_stage(db, vendor, PipelineStage.format_check, StageStatus.skipped,
                           f"Format checks skipped (country={country}, only India-specific rules implemented)")
 
+        # ── STAGE: external_verification ────────────────────────────────────────
+        _update_stage(db, vendor, PipelineStage.external_verification, StageStatus.running,
+                      "Verifying with external registries (MCA21, GST portal, RBI IFSC)")
+
+        external_check_results = []
+        if country == "IN":
+            ext_response = await asyncio.get_event_loop().run_in_executor(
+                None, run_external_verifications, form_data
+            )
+            if not ext_response.get("skipped"):
+                external_check_results = ext_response.get("checks", [])
+                format_check_results = format_check_results + external_check_results
+                _save_validation_results(db, vendor, "external_verification", external_check_results)
+
+            ext_fails = [r for r in external_check_results if r.get("status") == "fail"]
+            _update_stage(db, vendor, PipelineStage.external_verification, StageStatus.completed,
+                          f"External checks: {len(external_check_results)} checks, {len(ext_fails)} failed"
+                          if external_check_results else "External checks passed")
+        else:
+            _update_stage(db, vendor, PipelineStage.external_verification, StageStatus.skipped,
+                          f"External verification skipped (country={country})")
+
         # ── STAGE: extract_docs ──────────────────────────────────────────────────
         _update_stage(db, vendor, PipelineStage.extract_docs, StageStatus.running, "Extracting data from documents")
 
@@ -213,17 +268,25 @@ async def run_pipeline(
                 extracted_docs[doc_type] = doc.extracted_json
                 continue
 
-            # Load file bytes
+            # Load file bytes — prefer Supabase Storage, fall back to local disk
             file_bytes = None
             if doc_type in documents_data:
                 file_bytes, _ = documents_data[doc_type]
-            elif doc.file_path and os.path.exists(doc.file_path):
+            elif doc.storage_key:
+                file_bytes = await asyncio.get_event_loop().run_in_executor(
+                    None, download_document, doc.storage_key
+                )
+                if file_bytes:
+                    logger.info(f"[{run_id}] Loaded from Supabase Storage: {doc.storage_key}")
+                else:
+                    logger.warning(f"[{run_id}] Supabase Storage download failed for: {doc.storage_key}")
+            if file_bytes is None and doc.file_path and os.path.exists(doc.file_path):
                 try:
                     with open(doc.file_path, "rb") as f:
                         file_bytes = f.read()
-                    logger.info(f"[{run_id}] Loaded document bytes from disk: {doc.file_path}")
+                    logger.info(f"[{run_id}] Loaded document from local disk (fallback): {doc.file_path}")
                 except Exception as e:
-                    logger.error(f"[{run_id}] Failed to read document from disk ({doc.file_path}): {e}")
+                    logger.error(f"[{run_id}] Failed to read local file ({doc.file_path}): {e}")
 
             if file_bytes is None:
                 logger.warning(f"[{run_id}] No file bytes available for: {doc_type}")
@@ -247,23 +310,50 @@ async def run_pipeline(
         _update_stage(db, vendor, PipelineStage.extract_docs, StageStatus.completed,
                       f"Extracted data from {len(extracted_docs)} documents")
 
-        # ── OCR Quality Check ────────────────────────────────────────────────────
+        # ── OCR / Field-Weighted Quality Check ──────────────────────────────────────
         failed_docs = []
         for doc in db_docs:
             extracted = extracted_docs.get(doc.document_type, {})
-            non_empty_fields = len([v for v in extracted.values() if v is not None and str(v).strip() != ""])
+            quality_score = extracted.get("_quality_score", None)
+            low_conf_fields = extracted.get("_low_confidence_fields", [])
+            doc_type_mismatch = extracted.get("_doc_type_mismatch", False)
+            detected_type = extracted.get("_detected_type", "")
 
-            if not extracted or non_empty_fields == 0:
+            # Filter out internal metadata keys for counting
+            public = {k: v for k, v in extracted.items() if not k.startswith("_")}
+            non_empty_fields = len([v for v in public.values() if v is not None and str(v).strip() != ""])
+
+            if doc_type_mismatch:
+                doc.ocr_status = "failed"
+                doc.ocr_issues = [
+                    f"Wrong document type: expected {doc.document_type.replace('_', ' ')} "
+                    f"but this appears to be a '{detected_type}'. Please upload the correct document."
+                ]
+                failed_docs.append({"type": doc.document_type, "issues": doc.ocr_issues})
+            elif not public or non_empty_fields == 0:
                 doc.ocr_status = "failed"
                 doc.ocr_issues = ["No text could be extracted — document may be unreadable, blurry, or password-protected"]
                 failed_docs.append({"type": doc.document_type, "issues": doc.ocr_issues})
+            elif quality_score is not None and quality_score < 0.5:
+                # Critical fields missing even though some fields extracted
+                doc.ocr_status = "partial"
+                issues = ["Critical fields could not be extracted from this document"]
+                if low_conf_fields:
+                    issues.append(f"Low-confidence fields: {', '.join(low_conf_fields)} — document may be blurry or partially obscured")
+                doc.ocr_issues = issues
+                failed_docs.append({"type": doc.document_type, "issues": doc.ocr_issues})
             elif non_empty_fields < 2:
                 doc.ocr_status = "partial"
-                doc.ocr_issues = ["Only partial information could be extracted — document quality may be poor or fields may be obscured"]
+                doc.ocr_issues = ["Only partial information could be extracted — document quality may be poor"]
                 failed_docs.append({"type": doc.document_type, "issues": doc.ocr_issues})
             else:
                 doc.ocr_status = "success"
                 doc.ocr_issues = []
+                if low_conf_fields:
+                    doc.ocr_issues = [f"Low-confidence extraction on: {', '.join(low_conf_fields)}"]
+            # Persist quality score
+            if quality_score is not None:
+                doc.quality_score = quality_score
         db.commit()
 
         # Send OCR failure email if any docs failed
@@ -341,7 +431,7 @@ async def run_pipeline(
                 [],
                 {"risk_level": "low", "flags": []}
             )
-            await _finalize(db, vendor, decision, completeness_results, [], {"risk_level": "low", "flags": []})
+            await _finalize(db, vendor, decision, completeness_results, [], {"risk_level": "low", "flags": []}, pipeline_start)
             return
 
         # ── STAGE: check_consistency ─────────────────────────────────────────────
@@ -359,8 +449,10 @@ async def run_pipeline(
         _update_stage(db, vendor, PipelineStage.check_credibility, StageStatus.running,
                       "Analyzing fraud signals")
 
+        # Accumulate all deterministic check results for context
+        prior_checks = completeness_results + format_check_results + cross_doc_results
         credibility_result = await asyncio.get_event_loop().run_in_executor(
-            None, check_credibility, merged_data
+            None, check_credibility, merged_data, prior_checks
         )
         vendor.risk_level = credibility_result.get("risk_level", "low")
         db.commit()
@@ -391,7 +483,7 @@ async def run_pipeline(
                       f"Decision: {decision['status'].upper()}")
 
         # ── STAGE: output ────────────────────────────────────────────────────────
-        await _finalize(db, vendor, decision, all_checks, consistency_results, credibility_result)
+        await _finalize(db, vendor, decision, all_checks, consistency_results, credibility_result, pipeline_start)
 
     except Exception as e:
         logger.error(f"[{run_id}] Pipeline error: {e}", exc_info=True)
@@ -409,6 +501,7 @@ async def _finalize(
     completeness_results: List[Dict],
     consistency_results: List[Dict],
     credibility_result: Dict,
+    pipeline_start: datetime = None,
 ):
     """Finalize the pipeline: save decision, generate summary, send emails."""
     _update_stage(db, vendor, PipelineStage.output, StageStatus.running, "Generating output")
@@ -428,6 +521,9 @@ async def _finalize(
     vendor.decision_summary = summary
     vendor.decided_at = datetime.utcnow()
     vendor.updated_at = datetime.utcnow()
+    if pipeline_start:
+        duration_ms = int((datetime.utcnow() - pipeline_start).total_seconds() * 1000)
+        vendor.pipeline_duration_ms = duration_ms
     db.commit()
 
     # Email handling
@@ -448,8 +544,10 @@ async def _finalize(
         if not issues:
             issues = [reasons.get("message", "Additional information required")]
 
+        reason_codes = decision.get("reasons", {}).get("reason_codes", [])
         email_body = await asyncio.get_event_loop().run_in_executor(
-            None, generate_pending_email, vendor_name, contact_email, issues
+            None, generate_pending_email, vendor_name, contact_email, issues,
+            reason_codes, completeness_results, consistency_results
         )
         success = send_pending_email(contact_email, vendor_name, email_body)
 
@@ -459,6 +557,19 @@ async def _finalize(
             subject=f"Action Required: Vendor Onboarding for {vendor_name}",
             body=email_body,
             email_type="pending_request",
+            success=success,
+        )
+        db.add(email_log)
+        db.commit()
+
+    elif decision["status"] == "approved" and contact_email:
+        success = send_approval_email(contact_email, vendor_name)
+        email_log = EmailLog(
+            vendor_id=vendor.id,
+            recipient=contact_email,
+            subject=f"Vendor Application Approved — {vendor_name}",
+            body=_approval_email_body(vendor_name),
+            email_type="approval",
             success=success,
         )
         db.add(email_log)

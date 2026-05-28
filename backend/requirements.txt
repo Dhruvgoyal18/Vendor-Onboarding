@@ -17,3 +17,4 @@ resend>=2.20.0
 python-jose[cryptography]>=3.3.0
 httpx>=0.27.0
 python-dotenv>=1.0.0
+rapidfuzz>=3.0.0

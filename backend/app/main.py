@@ -9,6 +9,7 @@ from app.database import Base, engine, get_db
 from app.api.auth import router as auth_router
 from app.api.submissions import router as submissions_router
 from app.api.dashboard import router as dashboard_router
+from app.services.storage_service import ensure_bucket_exists
 
 settings = get_settings()
 
@@ -25,6 +26,8 @@ async def lifespan(app: FastAPI):
     # Create all tables on startup
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
+    # Ensure Supabase Storage bucket exists
+    ensure_bucket_exists()
 
     # Recovery: mark orphaned 'processing' vendors as 'error'
     # These are submissions where the background task was lost (server restart).
@@ -63,11 +66,44 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Vendor Onboarding API",
-    description="AI-powered vendor onboarding and procurement validation system",
+    description="""
+## AI-Powered Vendor Onboarding & Validation
+
+This API orchestrates a **12-stage validation pipeline** for vendor onboarding:
+
+1. **Intake** — receive submission, detect duplicates
+2. **Extract Fields** — normalize form data
+3. **Format Check (Layer 1)** — deterministic PAN/GSTIN/CIN/IFSC format validation (India)
+4. **Extract Docs** — OCR + LLM extraction from PDFs
+5. **Cross-Doc Check (Layer 3)** — compare extracted doc data against each other
+6. **Merge** — consolidate all data sources
+7. **Completeness Check** — ensure all required fields and documents are present
+8. **Consistency Analysis** — form vs document data cross-check
+9. **Credibility Analysis** — fraud signal detection via LLM
+10. **Decision** — deterministic rules engine (approved / pending / rejected)
+11. **Output** — generate summary, send emails
+12. **Done** — pipeline complete
+
+### Authentication
+- **Admin** endpoints require `Authorization: Bearer <admin_access_token>`
+- **Vendor** endpoints require `Authorization: Bearer <vendor_access_token>`
+- Tokens are obtained via `/api/auth/admin/login` or `/api/auth/vendor/login`
+- Access tokens expire in **15 minutes**; refresh via `/api/auth/{role}/refresh`
+
+### Real-time Updates
+Subscribe to `GET /api/submissions/{run_id}/events` for Server-Sent Events (SSE)
+as each pipeline stage completes.
+""",
     version="1.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url="/redoc",
+    openapi_tags=[
+        {"name": "auth", "description": "Authentication — login, token refresh, logout"},
+        {"name": "submissions", "description": "Vendor submission lifecycle — create, status, SSE stream"},
+        {"name": "admin", "description": "Admin-only operations — dashboard, override, retry"},
+        {"name": "dashboard", "description": "Admin dashboard statistics and submission history"},
+    ],
 )
 
 # CORS configuration
