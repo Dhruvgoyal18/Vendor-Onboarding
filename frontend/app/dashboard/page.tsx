@@ -177,7 +177,7 @@ export default function DashboardPage() {
         setVendors(vendorsData);
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        if (msg.includes("fetch") || msg.includes("network") || msg.includes("ECONNREFUSED")) {
+        if (e instanceof TypeError || msg.includes("fetch") || msg.includes("network") || msg.includes("ECONNREFUSED")) {
           setOffline(true);
         }
         console.error("Dashboard load error:", e);
@@ -238,10 +238,7 @@ export default function DashboardPage() {
             </code>
           </p>
           <p className="text-slate-500 text-xs mb-6 leading-relaxed">
-            Start the backend with:{" "}
-            <code className="text-slate-400 bg-slate-800 px-1 py-0.5 rounded text-xs">
-              uvicorn app.main:app --reload
-            </code>
+            Check that the backend is running and CORS is configured to allow this origin.
           </p>
           <button
             onClick={() => loadData()}
