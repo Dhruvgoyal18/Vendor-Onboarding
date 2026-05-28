@@ -37,6 +37,7 @@ from app.services.email_service import (
     _approval_email_body,
 )
 from app.config import get_settings
+from app.services.storage_service import download_document
 
 logger = logging.getLogger(__name__)
 settings = get_settings()
@@ -267,17 +268,25 @@ async def run_pipeline(
                 extracted_docs[doc_type] = doc.extracted_json
                 continue
 
-            # Load file bytes
+            # Load file bytes — prefer Supabase Storage, fall back to local disk
             file_bytes = None
             if doc_type in documents_data:
                 file_bytes, _ = documents_data[doc_type]
-            elif doc.file_path and os.path.exists(doc.file_path):
+            elif doc.storage_key:
+                file_bytes = await asyncio.get_event_loop().run_in_executor(
+                    None, download_document, doc.storage_key
+                )
+                if file_bytes:
+                    logger.info(f"[{run_id}] Loaded from Supabase Storage: {doc.storage_key}")
+                else:
+                    logger.warning(f"[{run_id}] Supabase Storage download failed for: {doc.storage_key}")
+            if file_bytes is None and doc.file_path and os.path.exists(doc.file_path):
                 try:
                     with open(doc.file_path, "rb") as f:
                         file_bytes = f.read()
-                    logger.info(f"[{run_id}] Loaded document bytes from disk: {doc.file_path}")
+                    logger.info(f"[{run_id}] Loaded document from local disk (fallback): {doc.file_path}")
                 except Exception as e:
-                    logger.error(f"[{run_id}] Failed to read document from disk ({doc.file_path}): {e}")
+                    logger.error(f"[{run_id}] Failed to read local file ({doc.file_path}): {e}")
 
             if file_bytes is None:
                 logger.warning(f"[{run_id}] No file bytes available for: {doc_type}")
@@ -537,7 +546,8 @@ async def _finalize(
 
         reason_codes = decision.get("reasons", {}).get("reason_codes", [])
         email_body = await asyncio.get_event_loop().run_in_executor(
-            None, generate_pending_email, vendor_name, contact_email, issues, reason_codes
+            None, generate_pending_email, vendor_name, contact_email, issues,
+            reason_codes, completeness_results, consistency_results
         )
         success = send_pending_email(contact_email, vendor_name, email_body)
 

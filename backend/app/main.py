@@ -9,6 +9,7 @@ from app.database import Base, engine, get_db
 from app.api.auth import router as auth_router
 from app.api.submissions import router as submissions_router
 from app.api.dashboard import router as dashboard_router
+from app.services.storage_service import ensure_bucket_exists
 
 settings = get_settings()
 
@@ -25,6 +26,8 @@ async def lifespan(app: FastAPI):
     # Create all tables on startup
     Base.metadata.create_all(bind=engine)
     logger.info("Database tables created/verified")
+    # Ensure Supabase Storage bucket exists
+    ensure_bucket_exists()
 
     # Recovery: mark orphaned 'processing' vendors as 'error'
     # These are submissions where the background task was lost (server restart).

@@ -253,32 +253,241 @@ Write the decision summary now."""
         return f"Decision: {decision['status'].upper()}. Automated summary unavailable."
 
 
-def render_pending_email(vendor_name: str, reason_codes: List[str]) -> str:
+_CHECK_LABELS: Dict[str, str] = {
+    "cin_format":                       "CIN format",
+    "cin_year_vs_incorporation_date":   "CIN year vs incorporation date",
+    "pan_format":                       "PAN format",
+    "pan_checksum":                     "PAN checksum",
+    "pan_entity_type":                  "PAN entity type",
+    "gstin_format":                     "GSTIN format",
+    "gstin_pan_match":                  "GSTIN ↔ PAN match",
+    "gstin_state_code":                 "GSTIN state code",
+    "gstin_state_vs_registered_state":  "GSTIN state vs registered state",
+    "ifsc_format":                      "IFSC format",
+    "ifsc_bank_name_match":             "IFSC ↔ bank name",
+    "account_number_format":            "Account number format",
+    "account_type":                     "Account type",
+    "email_format":                     "Email format",
+    "iban_format":                      "IBAN format",
+    "tax_id_format":                    "Tax ID format",
+    "account_name_match":               "Account name vs company name",
+    "company_name_vs_coi":              "Company name vs COI",
+    "company_name_vs_pan_gstin_doc":    "Company name vs PAN/GSTIN doc",
+    "company_name_vs_bank_doc":         "Company name vs bank document",
+    "coi_vs_pan_doc_name":              "COI name vs PAN document",
+    "coi_vs_bank_name":                 "COI name vs bank account",
+    "pan_vs_bank_name":                 "PAN name vs bank account",
+    "cin_coi_vs_form":                  "CIN on COI vs submitted CIN",
+    "pan_doc_vs_form":                  "PAN on document vs submitted PAN",
+    "gstin_doc_vs_form":                "GSTIN on document vs submitted GSTIN",
+    "gstin_embedded_pan_vs_pan_doc":    "PAN embedded in GSTIN vs PAN document",
+    "gstin_date_vs_incorporation_date": "GST registration date vs incorporation date",
+    "ifsc_doc_vs_form":                 "IFSC on bank document vs submitted IFSC",
+    "micr_ifsc_consistency":            "MICR code sanity check",
+    "account_type_doc_check":           "Account type on bank document",
+}
+
+_DOC_LABELS: Dict[str, str] = {
+    "coi":        "Certificate of Incorporation (COI)",
+    "registration": "Registration Certificate",
+    "pan_gstin":  "PAN Card & GSTIN Certificate",
+    "tax_cert":   "Tax Certificate",
+    "bank_letter": "Bank Letter / Cancelled Cheque",
+    "bank":       "Bank Letter / Cancelled Cheque",
+}
+
+_FIELD_LABELS: Dict[str, str] = {
+    "company_name":      "Company Name",
+    "registration_number": "Registration Number",
+    "country":           "Country",
+    "incorporation_date": "Incorporation Date",
+    "contact_name":      "Contact Name",
+    "contact_email":     "Contact Email",
+    "cin_number":        "CIN Number",
+    "pan_number":        "PAN Number",
+    "gstin_number":      "GSTIN Number",
+    "ifsc_code":         "IFSC Code",
+    "account_type":      "Account Type",
+    "registered_state":  "Registered State",
+    "bank_account_name": "Bank Account Name",
+    "account_number":    "Account Number",
+    "bank_name":         "Bank Name",
+    "bank_country":      "Bank Country",
+}
+
+
+def _section(title: str, lines: List[str]) -> str:
+    bar = "─" * 56
+    return f"{bar}\n{title}\n{bar}\n" + "\n".join(lines)
+
+
+def render_pending_email(
+    vendor_name: str,
+    reason_codes: List[str],
+    all_checks: Optional[List[Dict]] = None,
+    consistency_results: Optional[List[Dict]] = None,
+) -> str:
     """
-    Build a structured, deterministic pending email from reason codes.
-    This is the primary path — no LLM required, fully testable.
+    Build a structured pending email that shows the vendor exactly what
+    failed, what passed, and numbered action items to fix.
     """
+    checks = all_checks or []
+    consistency = consistency_results or []
+
+    # ── Bucket every check into one of five groups ──────────────────────────
+    missing_docs:   List[Dict] = []
+    missing_fields: List[Dict] = []
+    format_fails:   List[Dict] = []
+    cross_doc_fails: List[Dict] = []
+    warnings:       List[Dict] = []
+    passed:         List[Dict] = []
+
+    for r in checks:
+        status = r.get("status", "")
+        check  = r.get("check", "")
+        if status == "missing" and check.startswith("doc_"):
+            missing_docs.append(r)
+        elif status == "missing" and check.startswith("field_"):
+            missing_fields.append(r)
+        elif status == "fail":
+            if r.get("layer") == 3 or any(
+                check.startswith(p) for p in (
+                    "company_name_vs_", "coi_vs_", "pan_vs_",
+                    "cin_coi_", "pan_doc_", "gstin_doc_",
+                    "gstin_embedded_", "gstin_date_", "ifsc_doc_",
+                    "micr_", "account_type_doc",
+                )
+            ):
+                cross_doc_fails.append(r)
+            else:
+                format_fails.append(r)
+        elif status == "warning":
+            warnings.append(r)
+        elif status == "pass":
+            passed.append(r)
+
+    # Consistency results — mismatches and partial matches
+    consistency_issues = [
+        r for r in consistency
+        if r.get("status") in ("mismatch", "partial_match")
+    ]
+
+    sections: List[str] = []
+
+    # ── Missing documents ────────────────────────────────────────────────────
+    if missing_docs:
+        lines = []
+        for r in missing_docs:
+            doc_key = r.get("check", "").replace("doc_", "")
+            label = _DOC_LABELS.get(doc_key, doc_key.replace("_", " ").title())
+            lines.append(f"  ✗ {label}")
+        sections.append(_section("MISSING DOCUMENTS", lines))
+
+    # ── Missing form fields ──────────────────────────────────────────────────
+    if missing_fields:
+        lines = []
+        for r in missing_fields:
+            field_key = r.get("check", "").replace("field_", "")
+            label = _FIELD_LABELS.get(field_key, field_key.replace("_", " ").title())
+            lines.append(f"  ✗ {label}")
+        sections.append(_section("MISSING REQUIRED FIELDS", lines))
+
+    # ── Format / compliance failures ─────────────────────────────────────────
+    if format_fails:
+        lines = []
+        for r in format_fails:
+            check = r.get("check", "")
+            label = _CHECK_LABELS.get(check, check.replace("_", " ").title())
+            detail = r.get("detail", "")
+            lines.append(f"  ✗ {label}")
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("FORMAT & COMPLIANCE ISSUES", lines))
+
+    # ── Cross-document failures ──────────────────────────────────────────────
+    if cross_doc_fails:
+        lines = []
+        for r in cross_doc_fails:
+            check = r.get("check", "")
+            label = _CHECK_LABELS.get(check, check.replace("_", " ").title())
+            detail = r.get("detail", "")
+            lines.append(f"  ✗ {label}")
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("CROSS-DOCUMENT INCONSISTENCIES", lines))
+
+    # ── LLM consistency failures ─────────────────────────────────────────────
+    if consistency_issues:
+        lines = []
+        for r in consistency_issues:
+            check  = r.get("check", "").replace("_", " ").title()
+            detail = r.get("detail", "")
+            form_v = r.get("form_value")
+            doc_v  = r.get("document_value")
+            line = f"  ✗ {check}"
+            if form_v and doc_v:
+                line += f" (submitted: '{form_v}' / document: '{doc_v}')"
+            lines.append(line)
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("DATA INCONSISTENCIES (Form vs Documents)", lines))
+
+    # ── Warnings ─────────────────────────────────────────────────────────────
+    if warnings:
+        lines = []
+        for r in warnings:
+            check = r.get("check", "")
+            label = _CHECK_LABELS.get(check, check.replace("_", " ").title())
+            detail = r.get("detail", "")
+            lines.append(f"  ⚠ {label}")
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("WARNINGS (review recommended)", lines))
+
+    # ── What passed ──────────────────────────────────────────────────────────
+    total   = len(checks) + len(consistency)
+    n_pass  = len(passed) + len([r for r in consistency if r.get("status") in ("match",)])
+    n_fail  = total - n_pass
+    if passed:
+        pass_lines = [f"  {n_pass} of {total} checks passed" if total else ""]
+        key_pass = [
+            r for r in passed
+            if r.get("check", "") in _CHECK_LABELS
+        ][:6]
+        for r in key_pass:
+            label = _CHECK_LABELS.get(r.get("check", ""), "")
+            if label:
+                pass_lines.append(f"  ✓ {label}")
+        sections.append(_section("WHAT PASSED", pass_lines))
+
+    # ── Required action items ─────────────────────────────────────────────────
     action_items = []
     for i, code in enumerate(reason_codes, 1):
         msg, _ = REASON_CODES.get(code, (f"Please address issue: {code}", 5))
-        action_items.append(f"{i}. {msg}")
+        action_items.append(f"  {i}. {msg}")
 
     if not action_items:
-        action_items = ["1. Please review your submission and ensure all required information is complete."]
+        action_items = ["  1. Please review your submission and ensure all required information is complete."]
 
-    actions_block = "\n".join(action_items)
+    sections.append(_section("REQUIRED ACTIONS", action_items))
+
+    issues_block = "\n\n".join(sections)
 
     return f"""Dear {vendor_name},
 
 Thank you for submitting your vendor onboarding application.
 
-After reviewing your submission, we require the following to be addressed before we can proceed:
+After our automated review, your application requires the following corrections before we can proceed:
 
-{actions_block}
+{issues_block}
 
-To resubmit, please visit the vendor onboarding portal and use the "Resubmit Application" button on your status page. Your previous submission details will be pre-filled — simply correct the items listed above and resubmit.
+─────────────────────────────────────────────────────────
+HOW TO RESUBMIT
+─────────────────────────────────────────────────────────
+Visit the vendor portal and click "Resubmit Application" on your status page.
+Your previous details will be pre-filled — correct the issues above and resubmit.
 
-If you have any questions, please contact our procurement team.
+If you have questions, please contact our procurement team.
 
 Best regards,
 Vendor Onboarding Team"""
@@ -289,15 +498,18 @@ def generate_pending_email(
     contact_email: str,
     issues: List[str],
     reason_codes: Optional[List[str]] = None,
+    all_checks: Optional[List[Dict]] = None,
+    consistency_results: Optional[List[Dict]] = None,
 ) -> str:
     """
-    Generate pending email. Uses reason codes if provided (deterministic, preferred).
-    Falls back to LLM if no reason codes.
+    Generate pending email with full check breakdown.
+    Uses deterministic renderer when reason_codes are available (preferred path).
+    Falls back to LLM only when no structured data exists.
     """
-    if reason_codes:
-        return render_pending_email(vendor_name, reason_codes)
+    if reason_codes or all_checks:
+        return render_pending_email(vendor_name, reason_codes or [], all_checks, consistency_results)
 
-    # LLM fallback
+    # LLM fallback — no structured data available
     user_message = f"""
 Vendor: {vendor_name}
 Contact Email: {contact_email}
@@ -310,7 +522,7 @@ Write the email body now."""
         return call_llm(PENDING_EMAIL_PROMPT, user_message, max_tokens=400)
     except Exception as e:
         logger.error(f"Failed to generate pending email: {e}")
-        return render_pending_email(vendor_name, [])
+        return render_pending_email(vendor_name, [], None, None)
 
 
 def generate_rejection_email(vendor_name: str) -> str:
