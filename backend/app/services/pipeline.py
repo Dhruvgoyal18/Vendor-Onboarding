@@ -579,8 +579,10 @@ async def _finalize(
         db.commit()
 
     elif decision["status"] == "rejected" and contact_email:
+        rejection_reason_codes = decision.get("reasons", {}).get("reason_codes", [])
         email_body = await asyncio.get_event_loop().run_in_executor(
-            None, generate_rejection_email, vendor_name
+            None, generate_rejection_email, vendor_name,
+            rejection_reason_codes, completeness_results, consistency_results
         )
         success = send_rejection_email(contact_email, vendor_name, email_body)
 
