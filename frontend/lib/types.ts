@@ -32,12 +32,21 @@ export interface PipelineStage {
 export interface Document {
   id: string;
   document_type: string;
-  file_path: string | null;
+  storage_key: string | null;
   original_filename: string | null;
   extracted_json: Record<string, unknown> | null;
   extraction_confidence: number | null;
   ocr_status: "unknown" | "success" | "partial" | "failed";
   ocr_issues: string[] | null;
+  created_at: string;
+}
+
+export interface AuditEvent {
+  id: string;
+  event_type: string;
+  actor: string | null;
+  actor_role: string | null;
+  payload: Record<string, unknown> | null;
   created_at: string;
 }
 
@@ -94,11 +103,28 @@ export interface Vendor {
 }
 
 export interface VendorDetail extends Vendor {
+  // Detail-only fields
+  incorporation_date: string | null;
+  tax_id_type: string | null;
+  bank_name: string | null;
+  cin_number: string | null;
+  pan_number: string | null;
+  gstin_number: string | null;
+  ifsc_code: string | null;
+  account_type: string | null;
+  registered_state: string | null;
+  sla_due_at: string | null;
+  override_by: string | null;
+  override_at: string | null;
+  override_reason: string | null;
+  pipeline_duration_ms: number | null;
+  // Related objects
   documents: Document[];
   validation_results: ValidationResult[];
   pipeline_stages: PipelineStage[];
   merged_data: Record<string, unknown> | null;
   email_logs: EmailLog[];
+  audit_events: AuditEvent[];
 }
 
 export interface DashboardStats {

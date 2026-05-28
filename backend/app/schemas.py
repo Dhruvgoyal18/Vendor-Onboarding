@@ -94,7 +94,7 @@ class SubmissionFormData(BaseModel):
 class DocumentOut(BaseModel):
     id: str
     document_type: str
-    file_path: Optional[str]
+    storage_key: Optional[str]
     original_filename: Optional[str]
     extracted_json: Optional[Dict[str, Any]]
     extraction_confidence: Optional[float]
@@ -148,12 +148,25 @@ class EmailLogOut(BaseModel):
         from_attributes = True
 
 
+class AuditEventOut(BaseModel):
+    id: str
+    event_type: str
+    actor: Optional[str]
+    actor_role: Optional[str]
+    payload: Optional[Dict[str, Any]]
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
 class VendorVersionOut(BaseModel):
     run_id: str
     version_number: int
     created_at: datetime
     status: str
     decision_summary: Optional[str]
+    resubmission_notes: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -187,11 +200,28 @@ class VendorOut(BaseModel):
 
 
 class VendorDetailOut(VendorOut):
+    # Fields not surfaced in the list view
+    incorporation_date: Optional[str] = None
+    tax_id_type: Optional[str] = None
+    bank_name: Optional[str] = None
+    cin_number: Optional[str] = None
+    pan_number: Optional[str] = None
+    gstin_number: Optional[str] = None
+    ifsc_code: Optional[str] = None
+    account_type: Optional[str] = None
+    registered_state: Optional[str] = None
+    sla_due_at: Optional[datetime] = None
+    override_by: Optional[str] = None
+    override_at: Optional[datetime] = None
+    override_reason: Optional[str] = None
+    pipeline_duration_ms: Optional[int] = None
+    # Related objects
     documents: List[DocumentOut] = []
     validation_results: List[ValidationResultOut] = []
     pipeline_stages: List[PipelineStageOut] = []
-    merged_data: Optional[Dict[str, Any]]
+    merged_data: Optional[Dict[str, Any]] = None
     email_logs: List[EmailLogOut] = []
+    audit_events: List[AuditEventOut] = []
 
 
 # ─── Dashboard ──────────────────────────────────────────────────────────────────

@@ -19,7 +19,7 @@ from app.models import (
 )
 from app.schemas import (
     SubmissionFormData, VendorDetailOut, SubmissionResponse,
-    EmailLogOut, VendorVersionOut, OverrideRequest
+    EmailLogOut, VendorVersionOut, OverrideRequest, AuditEventOut
 )
 from app.services.email_service import send_approval_email, send_rejection_email
 from app.services.pipeline import run_pipeline, _generate_run_id, PIPELINE_STAGES
@@ -361,12 +361,27 @@ def get_submission(run_id: str, db: Session = Depends(get_db)):
         created_at=vendor.created_at,
         updated_at=vendor.updated_at,
         decided_at=vendor.decided_at,
+        # Detail-only fields
+        incorporation_date=vendor.incorporation_date,
+        tax_id_type=vendor.tax_id_type,
+        bank_name=vendor.bank_name,
+        cin_number=vendor.cin_number,
+        pan_number=vendor.pan_number,
+        gstin_number=vendor.gstin_number,
+        ifsc_code=vendor.ifsc_code,
+        account_type=vendor.account_type,
+        registered_state=vendor.registered_state,
+        sla_due_at=vendor.sla_due_at,
+        override_by=vendor.override_by,
+        override_at=vendor.override_at,
+        override_reason=vendor.override_reason,
+        pipeline_duration_ms=vendor.pipeline_duration_ms,
         merged_data=vendor.merged_data,
         documents=[
             {
                 "id": str(d.id),
                 "document_type": d.document_type,
-                "file_path": d.file_path,
+                "storage_key": d.storage_key,
                 "original_filename": d.original_filename,
                 "extracted_json": d.extracted_json,
                 "extraction_confidence": d.extraction_confidence,
@@ -409,10 +424,21 @@ def get_submission(run_id: str, db: Session = Depends(get_db)):
             }
             for el in sorted(vendor.email_logs, key=lambda x: x.sent_at)
         ],
+        audit_events=[
+            {
+                "id": str(ae.id),
+                "event_type": ae.event_type,
+                "actor": ae.actor,
+                "actor_role": ae.actor_role,
+                "payload": ae.payload,
+                "created_at": ae.created_at,
+            }
+            for ae in sorted(vendor.audit_events, key=lambda x: x.created_at)
+        ],
     )
 
 
-@router.get("/{run_id}/versions")
+@router.get("/{run_id}/versions", response_model=list[VendorVersionOut])
 def get_versions(run_id: str, db: Session = Depends(get_db)):
     """Get all versions of a vendor submission (same original_run_id)."""
     vendor = db.query(Vendor).filter(Vendor.run_id == run_id).first()
@@ -431,17 +457,7 @@ def get_versions(run_id: str, db: Session = Depends(get_db)):
         .order_by(Vendor.version_number)
         .all()
     )
-    return [
-        {
-            "run_id": v.run_id,
-            "version_number": v.version_number or 1,
-            "created_at": v.created_at.isoformat() if v.created_at else None,
-            "status": v.status,
-            "decision_summary": v.decision_summary,
-            "resubmission_notes": v.resubmission_notes,
-        }
-        for v in versions
-    ]
+    return versions
 
 
 @router.post("/{run_id}/resubmit", response_model=SubmissionResponse)

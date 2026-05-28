@@ -96,8 +96,6 @@ class Vendor(Base):
 
     # SLA & lifecycle
     sla_due_at = Column(DateTime)                  # created_at + 48h
-    deleted_at = Column(DateTime)
-    archived_at = Column(DateTime)
 
     # Admin override
     override_by = Column(String)                   # admin username
@@ -134,10 +132,9 @@ class Document(Base):
     ocr_issues = Column(JSON)
     # Extended document fields
     storage_key = Column(String)                    # Supabase storage object key
-    file_hash = Column(String)                      # SHA-256 of raw bytes
-    document_verified_type = Column(String)         # LLM-confirmed doc type
     quality_score = Column(Float)                   # 0-1 extraction quality score
     created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     vendor = relationship("Vendor", back_populates="documents")
 
@@ -192,7 +189,7 @@ class EmailLog(Base):
     recipient = Column(String, nullable=False)
     subject = Column(String, nullable=False)
     body = Column(Text)
-    email_type = Column(String)  # pending_request, rejection_neutral, approval
+    email_type = Column(String)  # pending_request, rejection_neutral, approval, ocr_failure
     sent_at = Column(DateTime, default=datetime.utcnow)
     success = Column(Boolean, default=True)
     error = Column(Text)
@@ -214,38 +211,12 @@ class AuditEvent(Base):
     vendor = relationship("Vendor", back_populates="audit_events")
 
 
-class LlmCache(Base):
-    """Cache LLM responses to avoid duplicate API calls for identical inputs."""
-    __tablename__ = "llm_cache"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    prompt_hash = Column(String, unique=True, nullable=False, index=True)  # SHA-256 of prompt+input
-    provider = Column(String)
-    model = Column(String)
-    response_json = Column(JSON)
-    created_at = Column(DateTime, default=datetime.utcnow)
-    expires_at = Column(DateTime)
-
-
-class CountryConfig(Base):
-    """Per-country validation configuration."""
-    __tablename__ = "country_configs"
-
-    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
-    country_code = Column(String(2), unique=True, nullable=False, index=True)
-    required_documents = Column(JSON)     # list of required doc types
-    required_fields = Column(JSON)        # list of required form fields
-    validation_rules = Column(JSON)       # country-specific rule overrides
-    sla_hours = Column(Integer, default=48)
-    active = Column(Boolean, default=True)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-
-
 # ─── Performance indexes ──────────────────────────────────────────────────────
 Index("ix_vendors_status", Vendor.status)
 Index("ix_vendors_country_status", Vendor.country, Vendor.status)
 Index("ix_vendors_contact_email", Vendor.contact_email)
 Index("ix_vendors_created_at", Vendor.created_at)
 Index("ix_vendors_original_run_id", Vendor.original_run_id)
+Index("ix_vendors_version", Vendor.original_run_id, Vendor.version_number)
 Index("ix_audit_events_vendor_id", AuditEvent.vendor_id)
 Index("ix_audit_events_event_type", AuditEvent.event_type)

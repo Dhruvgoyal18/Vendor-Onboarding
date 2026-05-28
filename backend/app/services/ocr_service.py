@@ -21,6 +21,14 @@ def _preprocess_image(img: Image.Image) -> Image.Image:
     img = img.point(lambda x: 0 if x < 128 else 255)   # binarize (threshold)
     return img
 
+
+def _tesseract_confidence(img: Image.Image) -> float:
+    """Return average word-level confidence (0–1) from Tesseract for a preprocessed image."""
+    data = pytesseract.image_to_data(img, output_type=pytesseract.Output.DICT)
+    confs = [c for c in data["conf"] if c > 0]  # -1 = non-text block
+    return round(sum(confs) / len(confs) / 100, 3) if confs else 0.0
+
+
 def extract_text_from_pdf_native(file_bytes: bytes) -> str:
     """Extract embedded text from a PDF using pdfplumber."""
     try:
@@ -32,61 +40,69 @@ def extract_text_from_pdf_native(file_bytes: bytes) -> str:
         return ""
 
 
-def extract_text_from_pdf_ocr(file_bytes: bytes) -> str:
-    """Convert PDF to images and extract text using Tesseract OCR with preprocessing."""
+def extract_text_from_pdf_ocr(file_bytes: bytes) -> tuple[str, float]:
+    """Convert PDF to images and extract text + OCR confidence using Tesseract."""
     try:
         images = convert_from_bytes(file_bytes, dpi=300)
         text_parts = []
+        all_confs: list[float] = []
         for img in images:
             processed = _preprocess_image(img)
-            text = pytesseract.image_to_string(processed)
-            text_parts.append(text)
-        return "\n".join(text_parts).strip()
+            text_parts.append(pytesseract.image_to_string(processed))
+            data = pytesseract.image_to_data(processed, output_type=pytesseract.Output.DICT)
+            all_confs.extend(c for c in data["conf"] if c > 0)
+        text = "\n".join(text_parts).strip()
+        confidence = round(sum(all_confs) / len(all_confs) / 100, 3) if all_confs else 0.0
+        return text, confidence
     except Exception as e:
         logger.error(f"pdf2image/pytesseract OCR failed: {e}")
-        return ""
+        return "", 0.0
 
 
-def extract_text_from_image(file_bytes: bytes) -> str:
-    """Extract text from an image (png, jpeg) using Tesseract OCR with preprocessing."""
+def extract_text_from_image(file_bytes: bytes) -> tuple[str, float]:
+    """Extract text + OCR confidence from an image (png, jpeg) using Tesseract."""
     try:
         img = Image.open(io.BytesIO(file_bytes))
         processed = _preprocess_image(img)
         text = pytesseract.image_to_string(processed)
-        return text.strip()
+        confidence = _tesseract_confidence(processed)
+        return text.strip(), confidence
     except Exception as e:
         logger.error(f"pytesseract image extraction failed: {e}")
-        return ""
+        return "", 0.0
 
 
-def extract_text(file_bytes: bytes, filename: str) -> str:
+def extract_text(file_bytes: bytes, filename: str) -> tuple[str, float]:
     """
-    Intelligently extract text from a document.
-    
+    Intelligently extract text + OCR confidence from a document.
+
+    Returns (text, ocr_confidence) where ocr_confidence is:
+      - Tesseract word-level average (0–1) for images and scanned PDFs
+      - 1.0 for native-text PDFs (embedded text is fully trusted)
+      - 0.0 on failure
+
     Strategy:
     1. If image, run OCR directly.
     2. If PDF, try native extraction (pdfplumber) first.
-    3. If native extraction yields very little text (likely a scanned PDF), 
+    3. If native extraction yields very little text (likely a scanned PDF),
        fallback to full OCR (pdf2image + pytesseract).
     """
     ext = filename.lower().rsplit(".", 1)[-1]
-    
+
     if ext in ("jpg", "jpeg", "png"):
         logger.info(f"Extracting text from image {filename} using OCR")
         return extract_text_from_image(file_bytes)
-        
+
     if ext == "pdf":
         logger.info(f"Attempting native text extraction for {filename}")
         text = extract_text_from_pdf_native(file_bytes)
-        
-        # If the text is very short, it's likely a scanned PDF image wrapper
+
         if len(text) < 100:
             logger.info(f"Native extraction yielded <100 chars for {filename}. Falling back to OCR.")
-            ocr_text = extract_text_from_pdf_ocr(file_bytes)
-            # Combine whatever little text we got with the OCR text
-            return text + "\n" + ocr_text
-            
-        return text
-        
+            ocr_text, ocr_conf = extract_text_from_pdf_ocr(file_bytes)
+            return text + "\n" + ocr_text, ocr_conf
+
+        return text, 1.0  # native embedded text → fully trusted
+
     logger.warning(f"Unsupported file type for OCR: {ext}")
-    return ""
+    return "", 0.0

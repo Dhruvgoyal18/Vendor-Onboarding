@@ -302,6 +302,8 @@ async def run_pipeline(
 
                 # Update document record
                 doc.extracted_json = extracted
+                doc.extraction_confidence = extracted.get("_extraction_confidence")
+                doc.updated_at = datetime.utcnow()
                 db.commit()
             except Exception as e:
                 logger.error(f"[{run_id}] Failed to extract {doc_type}: {e}")
@@ -354,6 +356,7 @@ async def run_pipeline(
             # Persist quality score
             if quality_score is not None:
                 doc.quality_score = quality_score
+            doc.updated_at = datetime.utcnow()
         db.commit()
 
         # Send OCR failure email if any docs failed

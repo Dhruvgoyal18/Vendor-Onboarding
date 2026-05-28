@@ -8,14 +8,12 @@ from sqlalchemy import text
 from app.database import engine
 from app.models import (  # noqa — registers metadata
     Vendor, Document, ValidationResult, PipelineStageLog,
-    RefreshToken, EmailLog, AuditEvent, LlmCache, CountryConfig,
+    RefreshToken, EmailLog, AuditEvent,
 )
 
 _STATEMENTS = [
     # ── Vendor table: Phase-2 columns ──────────────────────────────────────
     ("vendors.sla_due_at",              "ALTER TABLE vendors ADD COLUMN sla_due_at TIMESTAMP"),
-    ("vendors.deleted_at",              "ALTER TABLE vendors ADD COLUMN deleted_at TIMESTAMP"),
-    ("vendors.archived_at",             "ALTER TABLE vendors ADD COLUMN archived_at TIMESTAMP"),
     ("vendors.override_by",             "ALTER TABLE vendors ADD COLUMN override_by VARCHAR"),
     ("vendors.override_at",             "ALTER TABLE vendors ADD COLUMN override_at TIMESTAMP"),
     ("vendors.override_reason",         "ALTER TABLE vendors ADD COLUMN override_reason TEXT"),
@@ -23,11 +21,9 @@ _STATEMENTS = [
 
     # ── Document table: Phase-2 columns ────────────────────────────────────
     ("documents.storage_key",           "ALTER TABLE documents ADD COLUMN storage_key VARCHAR"),
-    ("documents.file_hash",             "ALTER TABLE documents ADD COLUMN file_hash VARCHAR"),
-    ("documents.document_verified_type","ALTER TABLE documents ADD COLUMN document_verified_type VARCHAR"),
     ("documents.quality_score",         "ALTER TABLE documents ADD COLUMN quality_score FLOAT"),
 
-    # ── New tables ──────────────────────────────────────────────────────────
+    # ── Core tables (idempotent) ────────────────────────────────────────────
     ("audit_events table", """
         CREATE TABLE IF NOT EXISTS audit_events (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -39,27 +35,15 @@ _STATEMENTS = [
             created_at TIMESTAMP DEFAULT now()
         )
     """),
-    ("llm_cache table", """
-        CREATE TABLE IF NOT EXISTS llm_cache (
+    ("refresh_tokens table", """
+        CREATE TABLE IF NOT EXISTS refresh_tokens (
             id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            prompt_hash VARCHAR UNIQUE NOT NULL,
-            provider VARCHAR,
-            model VARCHAR,
-            response_json JSONB,
-            created_at TIMESTAMP DEFAULT now(),
-            expires_at TIMESTAMP
-        )
-    """),
-    ("country_configs table", """
-        CREATE TABLE IF NOT EXISTS country_configs (
-            id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-            country_code VARCHAR(2) UNIQUE NOT NULL,
-            required_documents JSONB,
-            required_fields JSONB,
-            validation_rules JSONB,
-            sla_hours INTEGER DEFAULT 48,
-            active BOOLEAN DEFAULT TRUE,
-            updated_at TIMESTAMP DEFAULT now()
+            token_hash VARCHAR UNIQUE NOT NULL,
+            role VARCHAR NOT NULL,
+            subject VARCHAR NOT NULL,
+            expires_at TIMESTAMP NOT NULL,
+            revoked BOOLEAN DEFAULT FALSE,
+            created_at TIMESTAMP DEFAULT now()
         )
     """),
 
@@ -72,6 +56,22 @@ _STATEMENTS = [
     ("documents.ocr_status",            "ALTER TABLE documents ADD COLUMN ocr_status VARCHAR DEFAULT 'unknown'"),
     ("documents.ocr_issues",            "ALTER TABLE documents ADD COLUMN ocr_issues JSONB"),
 
+    # ── Schema V3: document timestamps ─────────────────────────────────────
+    ("documents.updated_at",            "ALTER TABLE documents ADD COLUMN updated_at TIMESTAMP"),
+    ("documents.updated_at backfill",   "UPDATE documents SET updated_at = created_at WHERE updated_at IS NULL"),
+
+    # ── Schema V3: drop dead document columns ──────────────────────────────
+    ("documents.file_hash drop",             "ALTER TABLE documents DROP COLUMN IF EXISTS file_hash"),
+    ("documents.document_verified_type drop","ALTER TABLE documents DROP COLUMN IF EXISTS document_verified_type"),
+
+    # ── Schema V4: drop zombie vendor columns ──────────────────────────────
+    ("vendors.deleted_at drop",         "ALTER TABLE vendors DROP COLUMN IF EXISTS deleted_at"),
+    ("vendors.archived_at drop",        "ALTER TABLE vendors DROP COLUMN IF EXISTS archived_at"),
+
+    # ── Schema V4: drop zombie tables ──────────────────────────────────────
+    ("drop llm_cache",                  "DROP TABLE IF EXISTS llm_cache"),
+    ("drop country_configs",            "DROP TABLE IF EXISTS country_configs"),
+
     # ── Indexes ─────────────────────────────────────────────────────────────
     ("idx vendors.status",              "CREATE INDEX IF NOT EXISTS ix_vendors_status ON vendors(status)"),
     ("idx vendors.country+status",      "CREATE INDEX IF NOT EXISTS ix_vendors_country_status ON vendors(country, status)"),
@@ -81,8 +81,7 @@ _STATEMENTS = [
     ("idx vendors.version",             "CREATE INDEX IF NOT EXISTS ix_vendors_version ON vendors(original_run_id, version_number)"),
     ("idx audit_events.vendor_id",      "CREATE INDEX IF NOT EXISTS ix_audit_events_vendor_id ON audit_events(vendor_id)"),
     ("idx audit_events.event_type",     "CREATE INDEX IF NOT EXISTS ix_audit_events_event_type ON audit_events(event_type)"),
-    ("idx llm_cache.prompt_hash",       "CREATE INDEX IF NOT EXISTS ix_llm_cache_prompt_hash ON llm_cache(prompt_hash)"),
-    ("idx country_configs.code",        "CREATE INDEX IF NOT EXISTS ix_country_configs_code ON country_configs(country_code)"),
+    ("idx refresh_tokens.token_hash",   "CREATE INDEX IF NOT EXISTS ix_refresh_tokens_token_hash ON refresh_tokens(token_hash)"),
 ]
 
 

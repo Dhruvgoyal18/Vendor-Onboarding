@@ -76,11 +76,12 @@ def _flatten_confident_fields(raw: dict, doc_type: str) -> dict:
     Flatten the per-field confidence format into simple field→value pairs.
     Fields with confidence below LOW_CONFIDENCE_THRESHOLD on critical fields
     are set to None so downstream checks correctly flag them as missing.
-    Also computes a quality_score (0–1) based on critical field presence.
+    Also computes quality_score (0–1) and extraction_confidence (avg LLM confidence).
     """
     flat = {}
     critical = CRITICAL_FIELDS.get(doc_type, [])
     low_confidence_critical: list[str] = []
+    all_confidences: list[float] = []
 
     for field, val in raw.items():
         if val is None:
@@ -89,7 +90,7 @@ def _flatten_confident_fields(raw: dict, doc_type: str) -> dict:
         if isinstance(val, dict) and "value" in val:
             v = val["value"]
             conf = float(val.get("confidence", 1.0))
-            # Drop critical fields below confidence threshold
+            all_confidences.append(conf)
             if field in critical and conf < LOW_CONFIDENCE_THRESHOLD:
                 flat[field] = None
                 low_confidence_critical.append(field)
@@ -99,7 +100,7 @@ def _flatten_confident_fields(raw: dict, doc_type: str) -> dict:
         else:
             flat[field] = val  # legacy format (no confidence wrapper) — accept as-is
 
-    # Compute quality score: fraction of critical fields successfully extracted
+    # Fraction of critical fields successfully extracted
     if critical:
         present = sum(1 for f in critical if flat.get(f))
         flat["_quality_score"] = round(present / len(critical), 2)
@@ -107,6 +108,11 @@ def _flatten_confident_fields(raw: dict, doc_type: str) -> dict:
     else:
         flat["_quality_score"] = 1.0
         flat["_low_confidence_fields"] = []
+
+    # Average LLM confidence across all fields that carried a confidence wrapper
+    flat["_extraction_confidence"] = (
+        round(sum(all_confidences) / len(all_confidences), 3) if all_confidences else None
+    )
 
     return flat
 
@@ -126,11 +132,11 @@ def extract_document(
     3. LLM extraction with per-field confidence
     4. Flatten per-field confidence; critical fields below 0.75 → None
     """
-    text = extract_text(file_bytes, filename)
+    text, ocr_confidence = extract_text(file_bytes, filename)
 
     if not text.strip():
         logger.warning(f"No text could be extracted from {filename}")
-        return {"_quality_score": 0.0, "_low_confidence_fields": []}
+        return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None}
 
     country_upper = (country or "").upper()
 
@@ -150,6 +156,8 @@ def extract_document(
                 "_type_confidence": type_conf,
                 "_quality_score": 0.0,
                 "_low_confidence_fields": [],
+                "_ocr_confidence": ocr_confidence,
+                "_extraction_confidence": None,
             }
         logger.info(f"Document classification: '{detected_type}' (conf={type_conf:.2f}) for {filename}")
 
@@ -174,8 +182,10 @@ def extract_document(
     try:
         raw = call_llm_json(system_prompt, user_message)
         if not isinstance(raw, dict):
-            return {"_quality_score": 0.0, "_low_confidence_fields": []}
-        return _flatten_confident_fields(raw, document_type)
+            return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": ocr_confidence, "_extraction_confidence": None}
+        result = _flatten_confident_fields(raw, document_type)
+        result["_ocr_confidence"] = ocr_confidence
+        return result
     except Exception as e:
         logger.error(f"LLM extraction failed for {filename}: {e}")
-        return {"_quality_score": 0.0, "_low_confidence_fields": []}
+        return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": ocr_confidence, "_extraction_confidence": None}
