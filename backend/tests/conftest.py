@@ -26,6 +26,13 @@ def patch_env():
 
 
 @pytest.fixture(scope="session")
+def admin_token(patch_env):
+    """Valid admin JWT for use in protected endpoint tests."""
+    from app.auth import create_access_token
+    return create_access_token("admin", "admin")
+
+
+@pytest.fixture(scope="session")
 def test_client(patch_env):
     from sqlalchemy import create_engine
     from sqlalchemy.orm import sessionmaker

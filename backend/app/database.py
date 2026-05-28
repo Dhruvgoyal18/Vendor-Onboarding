@@ -36,12 +36,12 @@ def _clean_db_url(url: str) -> str:
 
 _db_url = _clean_db_url(settings.database_url)
 
-engine = create_engine(
-    _db_url,
-    pool_pre_ping=True,
-    pool_size=5,
-    max_overflow=10,
-)
+_engine_kwargs: dict = {"pool_pre_ping": True}
+if not _db_url.startswith("sqlite"):
+    _engine_kwargs["pool_size"] = 5
+    _engine_kwargs["max_overflow"] = 10
+
+engine = create_engine(_db_url, **_engine_kwargs)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
