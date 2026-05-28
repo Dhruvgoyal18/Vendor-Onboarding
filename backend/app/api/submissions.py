@@ -23,6 +23,7 @@ from app.schemas import (
 )
 from app.services.email_service import send_approval_email, send_rejection_email
 from app.services.pipeline import run_pipeline, _generate_run_id, PIPELINE_STAGES
+from app.services.storage_service import upload_document
 
 logger = logging.getLogger(__name__)
 
@@ -75,40 +76,41 @@ async def create_submission(
 
     if registration_doc and registration_doc.filename:
         file_bytes = await _validate_file(registration_doc)
-        # For India, registration_doc is the COI
         doc_key = "coi" if form_data.country == "IN" else "registration"
         documents_data[doc_key] = (file_bytes, registration_doc.filename)
+        storage_key = upload_document(run_id, doc_key, registration_doc.filename, file_bytes)
         file_path = os.path.join(uploads_dir, f"{run_id}_{doc_key}_{registration_doc.filename}")
         with open(file_path, "wb") as f:
             f.write(file_bytes)
-        doc_records[doc_key] = (registration_doc.filename, file_path)
+        doc_records[doc_key] = (registration_doc.filename, file_path, storage_key)
 
     if bank_doc and bank_doc.filename:
         file_bytes = await _validate_file(bank_doc)
         documents_data["bank_letter"] = (file_bytes, bank_doc.filename)
+        storage_key = upload_document(run_id, "bank_letter", bank_doc.filename, file_bytes)
         file_path = os.path.join(uploads_dir, f"{run_id}_bank_letter_{bank_doc.filename}")
         with open(file_path, "wb") as f:
             f.write(file_bytes)
-        doc_records["bank_letter"] = (bank_doc.filename, file_path)
+        doc_records["bank_letter"] = (bank_doc.filename, file_path, storage_key)
 
     if tax_doc and tax_doc.filename:
         file_bytes = await _validate_file(tax_doc)
-        # For India, tax_doc = PAN+GSTIN cert (alias to pan_gstin)
         doc_key = "pan_gstin" if form_data.country == "IN" else "tax_cert"
         documents_data[doc_key] = (file_bytes, tax_doc.filename)
+        storage_key = upload_document(run_id, doc_key, tax_doc.filename, file_bytes)
         file_path = os.path.join(uploads_dir, f"{run_id}_{doc_key}_{tax_doc.filename}")
         with open(file_path, "wb") as f:
             f.write(file_bytes)
-        doc_records[doc_key] = (tax_doc.filename, file_path)
+        doc_records[doc_key] = (tax_doc.filename, file_path, storage_key)
 
-    # India-specific: dedicated PAN+GSTIN upload slot
     if pan_gstin_doc and pan_gstin_doc.filename:
         file_bytes = await _validate_file(pan_gstin_doc)
         documents_data["pan_gstin"] = (file_bytes, pan_gstin_doc.filename)
+        storage_key = upload_document(run_id, "pan_gstin", pan_gstin_doc.filename, file_bytes)
         file_path = os.path.join(uploads_dir, f"{run_id}_pan_gstin_{pan_gstin_doc.filename}")
         with open(file_path, "wb") as f:
             f.write(file_bytes)
-        doc_records["pan_gstin"] = (pan_gstin_doc.filename, file_path)
+        doc_records["pan_gstin"] = (pan_gstin_doc.filename, file_path, storage_key)
 
     # Create vendor record
     vendor = Vendor(
@@ -140,12 +142,13 @@ async def create_submission(
     db.refresh(vendor)
 
     # Create document records
-    for doc_type, (filename, file_path) in doc_records.items():
+    for doc_type, (filename, file_path, storage_key) in doc_records.items():
         doc = Document(
             vendor_id=vendor.id,
             document_type=doc_type,
             original_filename=filename,
             file_path=file_path,
+            storage_key=storage_key,
         )
         db.add(doc)
 
@@ -478,35 +481,39 @@ async def resubmit_vendor(
         file_bytes = await _validate_file(registration_doc)
         doc_key = "coi" if form_data.country == "IN" else "registration"
         documents_data[doc_key] = (file_bytes, registration_doc.filename)
+        storage_key = upload_document(new_run_id, doc_key, registration_doc.filename, file_bytes)
         fp = os.path.join(uploads_dir, f"{new_run_id}_{doc_key}_{registration_doc.filename}")
         with open(fp, "wb") as f:
             f.write(file_bytes)
-        doc_records[doc_key] = (registration_doc.filename, fp)
+        doc_records[doc_key] = (registration_doc.filename, fp, storage_key)
 
     if bank_doc and bank_doc.filename:
         file_bytes = await _validate_file(bank_doc)
         documents_data["bank_letter"] = (file_bytes, bank_doc.filename)
+        storage_key = upload_document(new_run_id, "bank_letter", bank_doc.filename, file_bytes)
         fp = os.path.join(uploads_dir, f"{new_run_id}_bank_letter_{bank_doc.filename}")
         with open(fp, "wb") as f:
             f.write(file_bytes)
-        doc_records["bank_letter"] = (bank_doc.filename, fp)
+        doc_records["bank_letter"] = (bank_doc.filename, fp, storage_key)
 
     if tax_doc and tax_doc.filename:
         file_bytes = await _validate_file(tax_doc)
         doc_key = "pan_gstin" if form_data.country == "IN" else "tax_cert"
         documents_data[doc_key] = (file_bytes, tax_doc.filename)
+        storage_key = upload_document(new_run_id, doc_key, tax_doc.filename, file_bytes)
         fp = os.path.join(uploads_dir, f"{new_run_id}_{doc_key}_{tax_doc.filename}")
         with open(fp, "wb") as f:
             f.write(file_bytes)
-        doc_records[doc_key] = (tax_doc.filename, fp)
+        doc_records[doc_key] = (tax_doc.filename, fp, storage_key)
 
     if pan_gstin_doc and pan_gstin_doc.filename:
         file_bytes = await _validate_file(pan_gstin_doc)
         documents_data["pan_gstin"] = (file_bytes, pan_gstin_doc.filename)
+        storage_key = upload_document(new_run_id, "pan_gstin", pan_gstin_doc.filename, file_bytes)
         fp = os.path.join(uploads_dir, f"{new_run_id}_pan_gstin_{pan_gstin_doc.filename}")
         with open(fp, "wb") as f:
             f.write(file_bytes)
-        doc_records["pan_gstin"] = (pan_gstin_doc.filename, fp)
+        doc_records["pan_gstin"] = (pan_gstin_doc.filename, fp, storage_key)
 
     original_run_id = old_vendor.original_run_id or old_vendor.run_id
     new_version = (old_vendor.version_number or 1) + 1
@@ -541,12 +548,13 @@ async def resubmit_vendor(
     db.commit()
     db.refresh(new_vendor)
 
-    for doc_type, (filename, file_path) in doc_records.items():
+    for doc_type, (filename, file_path, storage_key) in doc_records.items():
         doc = Document(
             vendor_id=new_vendor.id,
             document_type=doc_type,
             original_filename=filename,
             file_path=file_path,
+            storage_key=storage_key,
         )
         db.add(doc)
 
@@ -605,64 +613,68 @@ async def sse_events(run_id: str, db: Session = Depends(get_db)):
         raise HTTPException(404, f"Submission '{run_id}' not found")
 
     async def event_generator() -> AsyncGenerator[str, None]:
-        last_stages = {}
-        last_status = None
+        TERMINAL = {"approved", "rejected", "pending", "error"}
         max_polls = 180  # 3 minutes timeout
+
+        def _build_event(current_vendor, stages) -> str:
+            return json.dumps({
+                "run_id": run_id,
+                "status": current_vendor.status,
+                "current_stage": current_vendor.current_stage,
+                "stages": [
+                    {
+                        "stage": s.stage,
+                        "status": s.status,
+                        "message": s.message,
+                        "started_at": s.started_at.isoformat() if s.started_at else None,
+                        "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+                    }
+                    for s in sorted(stages, key=lambda x: PIPELINE_STAGES.index(x.stage))
+                ],
+                "decision_summary": current_vendor.decision_summary,
+                "risk_level": current_vendor.risk_level,
+            })
+
+        # Send initial state immediately — no 1-second wait
+        db.expire(vendor)
+        current_vendor = db.query(Vendor).filter(Vendor.run_id == run_id).first()
+        if not current_vendor:
+            return
+        stages = (
+            db.query(PipelineStageLog)
+            .filter(PipelineStageLog.vendor_id == current_vendor.id)
+            .all()
+        )
+        yield f"data: {_build_event(current_vendor, stages)}\n\n"
+        if current_vendor.status in TERMINAL:
+            return
+
+        last_stage_data = {s.stage: {"status": s.status, "message": s.message} for s in stages}
+        last_status = current_vendor.status
 
         for _ in range(max_polls):
             await asyncio.sleep(1)
 
-            # Refresh vendor
-            db.expire(vendor)
+            db.expire(current_vendor)
             current_vendor = db.query(Vendor).filter(Vendor.run_id == run_id).first()
             if not current_vendor:
                 break
 
-            # Get current stages
             stages = (
                 db.query(PipelineStageLog)
                 .filter(PipelineStageLog.vendor_id == current_vendor.id)
                 .all()
             )
-
-            stage_data = {
-                s.stage: {
-                    "status": s.status,
-                    "message": s.message,
-                }
-                for s in stages
-            }
-
+            stage_data = {s.stage: {"status": s.status, "message": s.message} for s in stages}
             current_status = current_vendor.status
-            has_changes = (stage_data != last_stages or current_status != last_status)
 
-            if has_changes:
-                last_stages = stage_data
+            if stage_data != last_stage_data or current_status != last_status:
+                last_stage_data = stage_data
                 last_status = current_status
+                yield f"data: {_build_event(current_vendor, stages)}\n\n"
 
-                event_data = {
-                    "run_id": run_id,
-                    "status": current_status,
-                    "current_stage": current_vendor.current_stage if current_vendor.current_stage else None,
-                    "stages": [
-                        {
-                            "stage": s.stage,
-                            "status": s.status,
-                            "message": s.message,
-                            "started_at": s.started_at.isoformat() if s.started_at else None,
-                            "completed_at": s.completed_at.isoformat() if s.completed_at else None,
-                        }
-                        for s in sorted(stages, key=lambda x: PIPELINE_STAGES.index(x.stage))
-                    ],
-                    "decision_summary": current_vendor.decision_summary,
-                    "risk_level": current_vendor.risk_level,
-                }
-                yield f"data: {json.dumps(event_data)}\n\n"
-
-            # Stop streaming once done
-            if current_status in ("approved", "rejected", "pending", "error"):
-                if stage_data.get("done", {}).get("status") == "completed":
-                    break
+            if current_status in TERMINAL:
+                break
 
     return StreamingResponse(
         event_generator(),
