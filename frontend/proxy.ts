@@ -91,7 +91,7 @@ async function handleProtectedRoute(
   return NextResponse.redirect(loginUrl);
 }
 
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
 
   if (pathname.startsWith("/dashboard") || pathname.startsWith("/runs")) {
