@@ -1,759 +1,226 @@
-# Step 1 — Submission Form
+# Implementation Plan — As Built
 
-## What to Collect — Form Fields
-
-### Company Information
-
-* Company name
-
-  * Text input
-  * Required
-  * Will be cross-checked against uploaded documents
-
-* Registration number
-
-  * Text input
-  * Required
-  * Format validation handled later in validation engine
-
-* Country of incorporation
-
-  * Dropdown using ISO country codes
-  * Required
-  * Used for tax validation logic
-
-* Incorporation date
-
-  * Date picker
-  * Required
-  * Used for fraud/credibility analysis
+> This document reflects what was actually implemented as of May 2026.
+> It serves as a reference for what each layer does and the order it was built.
 
 ---
 
-### Contact Information
+## Phase 1 — Core Submission Flow
 
-* Contact name
-* Contact email
+### 1.1 Database Schema
 
-  * Email validated client-side
+Tables created in `supabase/schema.sql`:
 
----
+- `vendors` — core submission record with all form fields, status, SLA, risk level, merged data
+- `documents` — one row per uploaded file with OCR results and extracted JSON
+- `validation_results` — per-check results (pass/fail/warning) across all pipeline stages
+- `pipeline_stage_logs` — per-stage timing and status
+- `refresh_tokens` — hashed JWT refresh tokens for rotation
+- `email_logs` — audit log of every email attempted
+- `audit_events` — immutable event log
+- `llm_cache` — deduplication cache for LLM calls
+- `country_configs` — per-country required fields, docs, SLA hours
 
-### Tax Information
+### 1.2 Backend Submission Endpoint
 
-* Tax ID
-* Tax ID type
+`POST /api/submissions` (multipart/form-data):
+- Accepts JSON `data` field + up to 4 file fields
+- Creates `vendors` row with `status=processing`
+- Creates `documents` rows (one per file) with `ocr_status=unknown`
+- Kicks off `run_pipeline(vendor_id)` as a `BackgroundTask`
+- Returns `{ run_id, message }` immediately
 
-  * VAT
-  * EIN
-  * GST
-  * PAN
-  * Other
+### 1.3 Pipeline Orchestrator
 
-Auto-fill based on country selection.
-
----
-
-### Banking Information
-
-* Bank account name
-* Account number / IBAN
-* Bank name
-* Bank country
-
-Important:
-
-* Account name should match company name
-* Bank country mismatch can become a fraud signal
+`services/pipeline.py` — `run_pipeline()`:
+- Runs all 13 stages sequentially
+- Each stage calls `_update_stage(stage_name, status, message)`
+- SSE event pushed after each stage update
+- `_finalize()` sets terminal status and timestamps
+- On unhandled exception: `vendors.status = "error"`
 
 ---
 
-### Document Uploads
+## Phase 2 — Validation Engine
 
-Required documents:
+### 2.1 India Format Checks (`services/india_validator.py`)
 
-1. Company registration certificate
-2. Bank letter / voided cheque
-3. Tax certificate
+All deterministic, no LLM. Runs at `format_check` stage:
 
-Accepted formats:
+- CIN format regex + year extraction check
+- PAN format regex + checksum algorithm + entity type check
+- GSTIN format regex + PAN embedding check + state code check + fuzzy state-vs-registered_state
+- IFSC format regex + bank name fuzzy match via `IFSC_BANK_CODES` dict
+- Account number (9–18 digits) + account type (must be Current)
 
-* PDF
-* JPG
-* PNG
+Known defect: `_extract_cin_year()` uses wrong slice `cin[6:10]` instead of `cin[8:12]`, causing silent skip of `cin_year_vs_incorporation_date` for all valid CINs.
 
-Max size:
+### 2.2 External API Verification (`services/external_api_service.py`)
 
-* 10MB each
+India only. Currently mocked for demo; replace each function body with real HTTP calls for production:
+
+- `verify_cin_mca21(cin)` — checks MCA21 registry
+- `verify_gstin_gst_portal(gstin)` — checks GST portal
+- `verify_ifsc_rbi(ifsc)` — RBI IFSC branch lookup + state check
+- `verify_penny_drop(account_number, ifsc, account_name)` — bank account validation
+
+### 2.3 OCR Service (`services/ocr_service.py`)
+
+- PDF: `pdfplumber` native extraction first
+- If `< 100 chars` extracted: fallback to `pdf2image` + Tesseract at 300 DPI
+- Images (JPG/PNG): Tesseract directly
+- Returns raw text string
+
+### 2.4 Document Extractor (`services/extractor.py`)
+
+- Takes OCR text + doc_type + country
+- Routes to country+type specific system prompt from `prompts/templates.py`
+- Calls LLM via `llm_service.call_llm_json()`
+- Returns JSON with fields + metadata keys (`_quality_score`, `_doc_type_mismatch`, etc.)
+- Quality assessment logic classifies `ocr_status` as `success | partial | failed`
+
+### 2.5 India Cross-Document Checks (`services/india_validator.py`)
+
+13-check matrix at `cross_doc_check` stage:
+- Company name from form vs each document's entity name (fuzzy ≥ 85)
+- Entity name cross-doc comparisons (COI vs PAN, COI vs Bank, PAN vs Bank)
+- CIN, PAN, GSTIN exact match between form and respective document
+- GSTIN embedded PAN chars vs PAN doc (catches mismatched entities)
+- GSTIN registration date ≥ incorporation date
+- IFSC exact match form vs bank doc
+- MICR code sanity check
+
+### 2.6 Completeness Check (`services/validator.py`)
+
+Two paths:
+- `_check_completeness_india()` — checks 15 required fields + 3 required doc groups
+- `_check_completeness_generic()` — checks 10 required fields + 3 required doc groups + IBAN validation
+
+Short-circuit: if any doc is missing → skip consistency + credibility → go straight to `decide`.
+
+### 2.7 Consistency Check (`services/validator.py`)
+
+LLM call with `CONSISTENCY_CHECK_PROMPT`. Compares form fields vs extracted doc data. Returns array of `{field, status, form_value, doc_value, detail}` with statuses `match | partial_match | mismatch | unverifiable`.
+
+### 2.8 Credibility Check (`services/validator.py`)
+
+LLM call with `CREDIBILITY_CHECK_PROMPT`. Analyzes all merged_data for fraud signals. Returns `{risk_level, flags, reasoning}`. Each high/medium flag is stored as a `fail` validation_result.
 
 ---
 
-## React Implementation Notes
+## Phase 3 — Decision Engine (`services/decision.py`)
 
-### Suggested Form State
+Fully deterministic. No LLM.
 
-```javascript
-const [form, setForm] = useState({
-  company_name: '',
-  reg_number: '',
-  country: '',
-  incorporation_date: '',
-  contact_name: '',
-  contact_email: '',
-  tax_id: '',
-  tax_id_type: '',
-  bank_account_name: '',
-  account_number: '',
-  bank_name: '',
-  bank_country: '',
-  docs: {
-    registration: null,
-    bank_letter: null,
-    tax_cert: null
-  }
-});
+### Severity Score
+
+```
++10 per missing document
++8  per format failure
++6  per structural failure
++8  per consistency mismatch
++3  per partial match
++15 if risk_level = medium
++25 per high fraud flag
++8  per medium fraud flag
 ```
 
----
+### Decision Tree
 
-### Form Submission Flow
-
-```javascript
-const handleSubmit = async () => {
-  const fd = new FormData();
-
-  fd.append('data', JSON.stringify(form));
-  fd.append('reg_doc', form.docs.registration);
-  fd.append('bank_doc', form.docs.bank_letter);
-  fd.append('tax_doc', form.docs.tax_cert);
-
-  const res = await fetch('/api/submissions', {
-    method: 'POST',
-    body: fd
-  });
-
-  const { run_id } = await res.json();
-
-  navigate(`/runs/${run_id}`);
-};
+```
+1. high risk or high fraud flag  →  REJECTED
+2. score ≥ 25                    →  REJECTED
+3. any missing/fail checks       →  PENDING + reason_codes
+4. all clear                     →  APPROVED
 ```
 
----
+### Reason Codes
 
-### Product Thinking Enhancement
-
-Auto-fill:
-
-* UK → VAT
-* US → EIN
-* India → GSTIN
-
-This reduces user errors.
+27 named reason codes with human-readable fix instructions. Primary pending email is rendered deterministically from these codes — no LLM cost.
 
 ---
 
-# Step 2 — Extraction Pipeline
+## Phase 4 — Output Stage
 
-## Three Extraction Sub-Steps
-
----
-
-## Step 2A — Normalize Form JSON
-
-Tasks:
-
-* Trim whitespace
-* Uppercase country codes
-* Normalize tax IDs
-* Clean account numbers
-
-Example Output:
-
-```json
-{
-  "company_name": "ACME LTD",
-  "country": "GB",
-  "tax_id": "GB123456789"
-}
-```
+1. LLM generates `decision_summary` (≤200 words, human-readable)
+2. `vendors.status`, `decided_at`, `pipeline_duration_ms` set
+3. Email dispatch:
+   - `pending` → `render_pending_email()` from reason codes (LLM fallback if none)
+   - `rejected` → LLM-generated neutral decline email
+   - `approved` → no email (configurable)
+4. OCR failure emails sent earlier in pipeline if any doc was `partial` or `failed`
 
 ---
 
-## Step 2B — Document Extraction
+## Phase 5 — API Layer
 
-### Strategy
+### Submissions API (`api/submissions.py`)
 
-#### Text PDFs
+- `POST /api/submissions` — form intake
+- `GET /api/submissions/{run_id}` — full detail
+- `GET /api/submissions/{run_id}/stages` — stage list for polling
+- `GET /api/submissions/{run_id}/events` — SSE stream
+- `GET /api/submissions/{run_id}/versions` — resubmission history
+- `POST /api/submissions/{run_id}/resubmit` — submit corrected version
+- `GET /api/submissions/mine` — vendor's own submissions (Vendor JWT)
 
-```text
-PDF → pdfplumber → extracted text → Claude
-```
+### Dashboard API (`api/dashboard.py`)
 
-#### Scanned/Image PDFs
+- `GET /api/dashboard/stats` — counts by status, risk level, SLA breach
+- `GET /api/dashboard/history` — paginated list with `status`, `search` filters
 
-```text
-PDF/Image → Claude Vision
-```
+### Auth API (`api/auth.py`)
 
----
-
-## Claude Extraction Prompt
-
-```text
-You are a document data extractor.
-
-Extract the following fields:
-- entity_name
-- registration_number
-- document_date
-- issuing_authority
-- account_name
-- account_number
-- tax_id
-- country
-
-Return ONLY JSON.
-Do not invent values.
-```
+- Admin: login with username/password → JWT pair
+- Vendor: login with email + run_id → JWT pair
+- Refresh token rotation (revoke old, issue new)
+- Logout (revoke refresh token)
 
 ---
 
-## Python Extraction Code
+## Phase 6 — Frontend
 
-```python
-import pdfplumber, base64, json
-from anthropic import Anthropic
+### Pages
 
-client = Anthropic()
+| Route | Purpose |
+|-------|---------|
+| `/` | Landing page with feature overview |
+| `/submit` | Vendor onboarding form (company, tax, bank, docs) |
+| `/runs/[id]` | Live pipeline tracker with SSE, stage cards, result details |
+| `/dashboard` | Admin dashboard (stats, history table, filters) |
+| `/admin/login` | Admin credentials login |
+| `/vendor/login` | Vendor login (email + run_id) |
+| `/vendor/me` | List of all vendor's submissions |
+| `/vendor/[runId]` | Vendor-facing status page |
 
-def extract_document(file_bytes: bytes, filename: str) -> dict:
-    ext = filename.lower().split('.')[-1]
+### Key Components
 
-    if ext == 'pdf':
-        import io
+- `SubmissionForm.tsx` — multi-section form with country-adaptive fields (India shows CIN/PAN/GSTIN)
+- `PipelineTracker.tsx` — animated stage list, polls SSE, shows per-stage check results
+- `StatusBadge.tsx` — colored pill for approved/pending/rejected/processing
 
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            text = ' '.join(
-                p.extract_text() or '' for p in pdf.pages
-            )
+### Auth Flow (Frontend)
 
-        if len(text.strip()) > 100:
-            content = [{
-                "type": "text",
-                "text": f"Document text:\n{text}"
-            }]
-        else:
-            b64 = base64.b64encode(file_bytes).decode()
-
-            content = [
-                {
-                    "type": "image",
-                    "source": {
-                        "type": "base64",
-                        "media_type": "application/pdf",
-                        "data": b64
-                    }
-                }
-            ]
-
-    resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1000,
-        messages=[{
-            "role": "user",
-            "content": content
-        }]
-    )
-
-    return json.loads(resp.content[0].text)
-```
+Middleware at Next.js edge verifies `admin_access_token` cookie, attempts silent refresh via `/api/auth/admin/refresh` route, redirects to login on failure. Same pattern for vendor routes.
 
 ---
 
-## Step 2C — Merge Into Vendor Object
+## Phase 7 — Security & Infrastructure
 
-Combine:
-
-* Form data
-* Registration document extraction
-* Tax document extraction
-* Bank document extraction
-
-Example:
-
-```json
-{
-  "run_id": "vnd_20260523_abc123",
-  "form": {},
-  "docs": {},
-  "provenance": {}
-}
-```
-
-Track provenance for every field.
+- **JWT**: HS256, secrets never stored — SHA-256 hash only
+- **CORS**: Allow-origin regex matching Vercel preview URLs (`*.vercel.app`) + explicit production origins
+- **File storage**: Supabase Storage (files uploaded via `storage_service.py`)
+- **Swagger**: Bearer token scheme configured in `main.py`
+- **Rate limiting**: Not implemented — recommended for production
 
 ---
 
-# Step 3 — Validation Engine
-
-The validation engine has three categories of checks.
-
----
-
-# Check 1 — Completeness Checks
-
-## Rule-Based Validation
-
-### Checks
-
-* Required fields present
-* Tax ID format valid
-* IBAN/account valid
-* Email format valid
-* Required documents uploaded
-
----
-
-## Tax ID Regex Examples
-
-### UK VAT
-
-```regex
-^GB[0-9]{9}$
-```
-
-### US EIN
-
-```regex
-^\d{2}-\d{7}$
-```
-
-### Indian GSTIN
-
-```regex
-^[0-9A-Z]{15}$
-```
-
----
-
-## IBAN Validation
-
-Use:
-
-```python
-schwifty
-```
-
----
-
-## Important Optimization
-
-If critical documents are missing:
-
-* Stop pipeline early
-* Avoid expensive AI calls
-
----
-
-# Check 2 — Consistency Checks
-
-## Claude-Powered Semantic Validation
-
-### Compare:
-
-* Company names
-* Account names
-* Tax IDs
-* Countries
-* Registration numbers
-
----
-
-## Consistency Prompt
-
-```text
-Compare these data fields.
-
-Return:
-- match
-- mismatch
-- partial_match
-- unverifiable
-
-Also include:
-- confidence
-- detail
-```
-
----
-
-## Example Claude Output
-
-```json
-[
-  {
-    "check": "company_name",
-    "status": "partial_match",
-    "confidence": 0.85,
-    "detail": "Ltd vs Limited"
-  }
-]
-```
-
----
-
-# Check 3 — Credibility Checks
-
-## Fraud Signal Analysis
-
-### Signals
-
-* Bank country mismatch
-* Very recent company
-* Suspicious documents
-* Generic templates
-* Email domain mismatch
-* Implausible business logic
-
----
-
-## Fraud Prompt
-
-```text
-Analyze this vendor submission for fraud signals.
-
-Return:
-- risk_level
-- flags
-- reasoning
-```
-
----
-
-## Example Output
-
-```json
-{
-  "risk_level": "medium",
-  "flags": [
-    {
-      "signal": "country_mismatch",
-      "severity": "medium"
-    }
-  ]
-}
-```
-
----
-
-# Step 4 — Decision Engine
-
-## Important Principle
-
-AI performs analysis.
-
-Your backend code makes the final deterministic decision.
-
-This is critical for explainability.
-
----
-
-## Decision Rules
-
-### Pending
-
-Conditions:
-
-* Missing documents
-* Missing critical fields
-* Data inconsistencies
-
----
-
-### Rejected
-
-Conditions:
-
-* High fraud risk
-* Multiple medium fraud flags
-
----
-
-### Approved
-
-Conditions:
-
-* All validations pass
-* No serious inconsistencies
-
----
-
-## Decision Logic Example
-
-```python
-def make_decision(completeness, consistency, credibility):
-
-    missing_docs = [
-        f for f in completeness
-        if f['status'] == 'missing'
-    ]
-
-    if missing_docs:
-        return {
-            "status": "pending"
-        }
-
-    if credibility['risk_level'] == 'high':
-        return {
-            "status": "rejected"
-        }
-
-    return {
-        "status": "approved"
-    }
-```
-
----
-
-## Decision Summary Prompt
-
-```text
-Write a clear 2-paragraph summary.
-
-Explain:
-- what passed
-- what failed
-- why the decision was made
-```
-
----
-
-# Step 5 — Output Layer
-
-## Approved Flow
-
-Actions:
-
-* Save VendorRecord
-* Save validation results
-* Store timestamps
-* Optional internal notification
-
-No vendor email required.
-
----
-
-## Pending Flow
-
-Actions:
-
-* Save pending status
-* Generate vendor-facing email
-* Send via Resend or SendGrid
-* Log communication
-
----
-
-## Pending Email Prompt
-
-```text
-Write a professional onboarding follow-up email.
-
-Clearly explain:
-- what is missing
-- what needs correction
-- how to resubmit
-
-Keep under 200 words.
-```
-
----
-
-## Email Sending Example
-
-```python
-import resend
-
-def send_pending_email(email, body):
-
-    resend.Emails.send({
-        "from": "onboarding@company.com",
-        "to": email,
-        "subject": "Vendor onboarding action required",
-        "text": body
-    })
-```
-
----
-
-## Rejected Flow
-
-Actions:
-
-* Save fraud reasoning internally
-* Store audit trail
-* Send neutral decline email
-* Never expose fraud reasoning externally
-
----
-
-# Step 6 — Dashboard
-
-## Dashboard View 1 — Run History Table
-
-Columns:
-
-* Vendor name
-* Submitted time
-* Status badge
-* Decision reason
-* Actions
-
----
-
-## Dashboard View 2 — Live Run View
-
-## Pipeline Stages
-
-```text
-Intake
-↓
-Extract Fields
-↓
-Extract Documents
-↓
-Merge
-↓
-Completeness Validation
-↓
-Consistency Check
-↓
-Credibility Check
-↓
-Decision
-↓
-Output
-```
-
----
-
-## Real-Time Updates
-
-### Option 1 — Polling
-
-Frontend polls every 2 seconds.
-
-### Option 2 — SSE (Recommended)
-
-Use Server-Sent Events.
-
-Benefits:
-
-* Real-time UX
-* More production-like
-* Better demo impact
-
----
-
-## Backend Stage Tracking
-
-```python
-PIPELINE_STAGES = [
-    "intake",
-    "extract_fields",
-    "extract_docs",
-    "merge",
-    "check_completeness",
-    "check_consistency",
-    "check_credibility",
-    "decide",
-    "output"
-]
-```
-
-Store each stage completion in DB.
-
----
-
-## React Polling Example
-
-```javascript
-useEffect(() => {
-
-  const poll = setInterval(async () => {
-
-    const res = await fetch(`/api/runs/${runId}/stages`);
-    const data = await res.json();
-
-    setStages(data.stages);
-
-  }, 2000);
-
-  return () => clearInterval(poll);
-
-}, []);
-```
-
----
-
-# Edge Cases
-
----
-
-## EC-1 — Name Typo
-
-### Example
-
-```text
-Apex Solutions Ltd
-vs
-Apex Solution Ltd
-```
-
-### Expected
-
-* Pending
-* Clarification request
-* Not fraud
-
----
-
-## EC-2 — Country/Bank Mismatch
-
-### Example
-
-```text
-Company Country: UK
-Bank Country: Nigeria
-```
-
-### Expected
-
-* Credibility flag
-* Pending or rejected
-
----
-
-## EC-3 — Missing Bank Letter
-
-### Expected
-
-* Immediate pending
-* Pipeline short-circuit
-* Avoid unnecessary AI calls
-
----
-
-## EC-4 — Duplicate Submission
-
-### Detection
-
-Check:
-
-* Same company name
-* Same tax ID
-
-### Expected
-
-* Duplicate warning
-* Ask if banking details changed
+## Known Defects & Tech Debt
+
+| ID | Location | Description |
+|----|----------|-------------|
+| BUG-01 | `india_validator.py:_extract_cin_year` | Wrong slice `cin[6:10]` — CIN year check silently skips for all valid CINs |
+| TD-01 | `external_api_service.py` | All external verifications are mocked — replace with real HTTP calls for production |
+| TD-02 | `pipeline.py` | No retry logic for LLM calls — a transient Groq 429 aborts the pipeline |
+| TD-03 | Auth | Admin password stored as plain string in env var — should be bcrypt hash |
+| TD-04 | `output` stage | Approval emails not sent — only pending and rejection emails implemented |

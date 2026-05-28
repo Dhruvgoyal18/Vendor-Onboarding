@@ -525,16 +525,178 @@ Write the email body now."""
         return render_pending_email(vendor_name, [], None, None)
 
 
-def generate_rejection_email(vendor_name: str) -> str:
-    """Generate a neutral rejection email using the LLM."""
-    user_message = f"Vendor: {vendor_name}\n\nWrite the decline email body now."
+def render_rejection_email(
+    vendor_name: str,
+    reason_codes: List[str],
+    all_checks: Optional[List[Dict]] = None,
+    consistency_results: Optional[List[Dict]] = None,
+) -> str:
+    """
+    Build a structured rejection email that shows the vendor exactly what
+    failed and what they would need to fix before reapplying.
+    """
+    checks = all_checks or []
+    consistency = consistency_results or []
 
+    missing_docs:    List[Dict] = []
+    missing_fields:  List[Dict] = []
+    format_fails:    List[Dict] = []
+    cross_doc_fails: List[Dict] = []
+    warnings:        List[Dict] = []
+    passed:          List[Dict] = []
+
+    for r in checks:
+        status = r.get("status", "")
+        check  = r.get("check", "")
+        if status == "missing" and check.startswith("doc_"):
+            missing_docs.append(r)
+        elif status == "missing" and check.startswith("field_"):
+            missing_fields.append(r)
+        elif status == "fail":
+            if r.get("layer") == 3 or any(
+                check.startswith(p) for p in (
+                    "company_name_vs_", "coi_vs_", "pan_vs_",
+                    "cin_coi_", "pan_doc_", "gstin_doc_",
+                    "gstin_embedded_", "gstin_date_", "ifsc_doc_",
+                    "micr_", "account_type_doc",
+                )
+            ):
+                cross_doc_fails.append(r)
+            else:
+                format_fails.append(r)
+        elif status == "warning":
+            warnings.append(r)
+        elif status == "pass":
+            passed.append(r)
+
+    consistency_issues = [
+        r for r in consistency
+        if r.get("status") in ("mismatch", "partial_match")
+    ]
+
+    sections: List[str] = []
+
+    if missing_docs:
+        lines = []
+        for r in missing_docs:
+            doc_key = r.get("check", "").replace("doc_", "")
+            label = _DOC_LABELS.get(doc_key, doc_key.replace("_", " ").title())
+            lines.append(f"  ✗ {label}")
+        sections.append(_section("MISSING DOCUMENTS", lines))
+
+    if missing_fields:
+        lines = []
+        for r in missing_fields:
+            field_key = r.get("check", "").replace("field_", "")
+            label = _FIELD_LABELS.get(field_key, field_key.replace("_", " ").title())
+            lines.append(f"  ✗ {label}")
+        sections.append(_section("MISSING REQUIRED FIELDS", lines))
+
+    if format_fails:
+        lines = []
+        for r in format_fails:
+            check = r.get("check", "")
+            label = _CHECK_LABELS.get(check, check.replace("_", " ").title())
+            detail = r.get("detail", "")
+            lines.append(f"  ✗ {label}")
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("FORMAT & COMPLIANCE ISSUES", lines))
+
+    if cross_doc_fails:
+        lines = []
+        for r in cross_doc_fails:
+            check = r.get("check", "")
+            label = _CHECK_LABELS.get(check, check.replace("_", " ").title())
+            detail = r.get("detail", "")
+            lines.append(f"  ✗ {label}")
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("CROSS-DOCUMENT INCONSISTENCIES", lines))
+
+    if consistency_issues:
+        lines = []
+        for r in consistency_issues:
+            check  = r.get("check", "").replace("_", " ").title()
+            detail = r.get("detail", "")
+            form_v = r.get("form_value")
+            doc_v  = r.get("document_value")
+            line = f"  ✗ {check}"
+            if form_v and doc_v:
+                line += f" (submitted: '{form_v}' / document: '{doc_v}')"
+            lines.append(line)
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("DATA INCONSISTENCIES (Form vs Documents)", lines))
+
+    if warnings:
+        lines = []
+        for r in warnings:
+            check = r.get("check", "")
+            label = _CHECK_LABELS.get(check, check.replace("_", " ").title())
+            detail = r.get("detail", "")
+            lines.append(f"  ⚠ {label}")
+            if detail:
+                lines.append(f"    → {detail}")
+        sections.append(_section("ADDITIONAL ISSUES", lines))
+
+    if passed:
+        total  = len(checks) + len(consistency)
+        n_pass = len(passed) + len([r for r in consistency if r.get("status") == "match"])
+        pass_lines = [f"  {n_pass} of {total} checks passed" if total else ""]
+        key_pass = [r for r in passed if r.get("check", "") in _CHECK_LABELS][:5]
+        for r in key_pass:
+            label = _CHECK_LABELS.get(r.get("check", ""), "")
+            if label:
+                pass_lines.append(f"  ✓ {label}")
+        sections.append(_section("WHAT PASSED", pass_lines))
+
+    action_items = []
+    for i, code in enumerate(reason_codes, 1):
+        msg, _ = REASON_CODES.get(code, (f"Please address issue: {code}", 5))
+        action_items.append(f"  {i}. {msg}")
+
+    if not action_items:
+        action_items = ["  1. Please review the issues above and correct them before reapplying."]
+
+    sections.append(_section("ISSUES TO RESOLVE BEFORE REAPPLYING", action_items))
+
+    issues_block = "\n\n".join(sections) if sections else (
+        "  Your application did not meet the required validation criteria."
+    )
+
+    return f"""Dear {vendor_name},
+
+Thank you for submitting your vendor onboarding application. After a thorough automated review, we regret to inform you that we are unable to approve your application at this time.
+
+Below is a detailed breakdown of the issues identified:
+
+{issues_block}
+
+─────────────────────────────────────────────────────────
+WHAT YOU CAN DO NEXT
+─────────────────────────────────────────────────────────
+If you are able to resolve the issues above, you may resubmit your application via the vendor portal. Your previous details will be pre-filled — simply correct the issues and resubmit.
+
+If you believe this decision was made in error or require further clarification, please contact our procurement team.
+
+Best regards,
+Vendor Onboarding Team"""
+
+
+def generate_rejection_email(
+    vendor_name: str,
+    reason_codes: Optional[List[str]] = None,
+    all_checks: Optional[List[Dict]] = None,
+    consistency_results: Optional[List[Dict]] = None,
+) -> str:
+    """Generate a detailed rejection email showing the vendor exactly what failed."""
+    if reason_codes or all_checks:
+        return render_rejection_email(vendor_name, reason_codes or [], all_checks, consistency_results)
+
+    user_message = f"Vendor: {vendor_name}\n\nWrite the decline email body now."
     try:
         return call_llm(REJECTION_EMAIL_PROMPT, user_message, max_tokens=300)
     except Exception as e:
         logger.error(f"Failed to generate rejection email: {e}")
-        return (
-            f"Dear {vendor_name},\n\nThank you for your interest in becoming a vendor. "
-            "After careful review, we are unable to proceed with your application at this time.\n\n"
-            "We appreciate your interest and wish you the best.\n\nBest regards,\nProcurement Team"
-        )
+        return render_rejection_email(vendor_name, [], None, None)

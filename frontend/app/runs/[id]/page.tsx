@@ -28,19 +28,60 @@ function computeScore(results: ValidationResult[]): number {
   return Math.round((points / active.length) * 100);
 }
 
-function computeOverallScore(
+// Weight hierarchy — cross_doc_check carries the highest weight (40%) because
+// document ↔ form matching is the strongest anti-fraud signal.
+// docs_uploaded (20%) is a virtual category derived from completeness doc_* checks
+// so that missing documents directly tank 20% of the score before cross_doc is even considered.
+const SCORE_WEIGHTS: Record<string, number> = {
+  format_check:    0.20,
+  docs_uploaded:   0.20,   // virtual — derived from completeness doc_* checks
+  completeness:    0.10,   // field-only checks after docs_uploaded is split off
+  cross_doc_check: 0.40,
+  consistency:     0.05,
+  credibility:     0.05,
+};
+
+// When docs are missing these categories produce no results (pipeline skips them).
+// Count them as 0 rather than excluding them so the score is penalised correctly.
+const DOC_DEPENDENT_CATEGORIES = new Set(["cross_doc_check", "consistency"]);
+
+// Split the raw byCategory map (keyed by DB category strings) into the display map
+// that separates doc-presence checks ("docs_uploaded") from field checks ("completeness").
+function buildDisplayCategories(
   byCategory: Record<string, ValidationResult[]>
-): number {
-  const weights: Record<string, number> = {
-    format_check: 0.25, completeness: 0.25, cross_doc_check: 0.20,
-    consistency: 0.20, credibility: 0.10,
+): Record<string, ValidationResult[]> {
+  const allCompleteness = byCategory["completeness"] ?? [];
+  return {
+    ...byCategory,
+    docs_uploaded: allCompleteness.filter((r) => r.check_name.startsWith("doc_")),
+    completeness:  allCompleteness.filter((r) => !r.check_name.startsWith("doc_")),
   };
+}
+
+function computeOverallScore(
+  byDisplay: Record<string, ValidationResult[]>
+): number {
+  // Docs are missing when any doc_* check in the docs_uploaded bucket is "missing"
+  const docsAreMissing = (byDisplay["docs_uploaded"] ?? []).some(
+    (r) => r.status === "missing"
+  );
+
   let totalWeight = 0;
   let weightedSum = 0;
-  for (const [cat, weight] of Object.entries(weights)) {
-    const score = computeScore(byCategory[cat] ?? []);
-    if (score >= 0) { weightedSum += score * weight; totalWeight += weight; }
+
+  for (const [cat, weight] of Object.entries(SCORE_WEIGHTS)) {
+    const score = computeScore(byDisplay[cat] ?? []);
+
+    if (score >= 0) {
+      weightedSum += score * weight;
+      totalWeight += weight;
+    } else if (docsAreMissing && DOC_DEPENDENT_CATEGORIES.has(cat)) {
+      // Docs weren't uploaded → these checks couldn't run → penalise as 0, not N/A.
+      totalWeight += weight;
+    }
+    // Genuinely not-applicable categories (e.g. cross_doc for non-India) → exclude.
   }
+
   return totalWeight > 0 ? Math.round(weightedSum / totalWeight) : -1;
 }
 
@@ -70,22 +111,24 @@ const CATEGORY_META: Record<string, {
   label: string; icon: React.ComponentType<{ className?: string }>;
   description: string;
 }> = {
-  format_check: { label: "Identity & Format", icon: Shield, description: "PAN, GSTIN, CIN, IFSC format validation" },
-  completeness: { label: "Completeness", icon: FileText, description: "Required fields and documents" },
-  cross_doc_check: { label: "Cross-Document", icon: FileText, description: "Document ↔ form data matching" },
-  consistency: { label: "Consistency", icon: CheckCircle, description: "Form vs extracted document data" },
-  credibility: { label: "Risk & Credibility", icon: AlertTriangle, description: "Fraud signals and risk assessment" },
+  format_check:    { label: "Identity & Format",   icon: Shield,       description: "PAN, GSTIN, CIN, IFSC format validation" },
+  docs_uploaded:   { label: "Docs Uploaded",        icon: FileText,     description: "Required documents present" },
+  completeness:    { label: "Field Completeness",   icon: FileText,     description: "Required fields filled in" },
+  cross_doc_check: { label: "Cross-Document",       icon: FileText,     description: "Document ↔ form data matching" },
+  consistency:     { label: "Consistency",          icon: CheckCircle,  description: "Form vs extracted document data" },
+  credibility:     { label: "Risk & Credibility",   icon: AlertTriangle, description: "Fraud signals and risk assessment" },
 };
 
 function CategoryScoreCard({
-  category, results,
+  category, results, docsAreMissing = false,
 }: {
-  category: string; results: ValidationResult[];
+  category: string; results: ValidationResult[]; docsAreMissing?: boolean;
 }) {
   const meta = CATEGORY_META[category];
-  if (!meta || results.length === 0) return null;
+  if (!meta) return null;
+  if (results.length === 0 && !(docsAreMissing && DOC_DEPENDENT_CATEGORIES.has(category))) return null;
 
-  const score = computeScore(results);
+  const score = results.length === 0 ? 0 : computeScore(results);
   const passCount = results.filter((r) => ["pass", "match"].includes(r.status)).length;
   const failCount = results.filter((r) => ["fail", "mismatch", "missing"].includes(r.status)).length;
   const warnCount = results.filter((r) => ["warning", "partial_match"].includes(r.status)).length;
@@ -242,15 +285,155 @@ function DecisionBanner({ status, summary, riskLevel }: {
 }
 
 // ─── Email Log ────────────────────────────────────────────────────────────────────
+function AdminSummaryContent({
+  emailType, vendor,
+}: {
+  emailType: string | null; vendor: VendorDetail;
+}) {
+  const vr = vendor.validation_results;
+
+  const missingDocs   = vr.filter((r) => r.status === "missing" && r.check_name.startsWith("doc_"));
+  const missingFields = vr.filter((r) => r.status === "missing" && r.check_name.startsWith("field_"));
+  const formatFails   = vr.filter((r) => r.status === "fail"    && r.category === "format_check");
+  const crossDocFails = vr.filter((r) => r.status === "fail"    && r.category === "cross_doc_check");
+  const consistFails  = vr.filter((r) => ["mismatch", "partial_match"].includes(r.status) && r.category === "consistency");
+  const credFails     = vr.filter((r) => ["fail", "mismatch"].includes(r.status) && r.category === "credibility");
+  const passCount     = vr.filter((r) => ["pass", "match"].includes(r.status)).length;
+  const totalChecks   = vr.length;
+
+  if (emailType === "approval") {
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <CheckCircle className="w-4 h-4 text-emerald-400 flex-shrink-0" />
+          <span className="text-sm font-semibold text-emerald-300">All checks passed — vendor approved</span>
+        </div>
+        <p className="text-xs text-slate-400">{passCount} of {totalChecks} validation checks passed with no failures.</p>
+        {vendor.risk_level && (
+          <p className="text-xs text-slate-500">Risk level: <span className="text-emerald-400">{vendor.risk_level}</span></p>
+        )}
+      </div>
+    );
+  }
+
+  if (emailType === "ocr_failure") {
+    const failedOcr = vendor.documents.filter((d) => ["failed", "partial"].includes(d.ocr_status));
+    return (
+      <div className="space-y-2">
+        <div className="flex items-center gap-2">
+          <AlertTriangle className="w-4 h-4 text-amber-400 flex-shrink-0" />
+          <span className="text-sm font-semibold text-amber-300">OCR failure — vendor notified to reupload</span>
+        </div>
+        {failedOcr.length > 0 && (
+          <div className="space-y-1">
+            {failedOcr.map((d) => (
+              <p key={d.id} className="text-xs text-slate-400">
+                ✗ <span className="capitalize">{d.document_type.replace(/_/g, " ")}</span>
+                <span className="text-slate-600 ml-1">({d.ocr_status})</span>
+              </p>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const isRejection = emailType === "rejection_neutral";
+  const isPending   = emailType === "pending_request";
+
+  const totalIssues = missingDocs.length + missingFields.length + formatFails.length + crossDocFails.length + consistFails.length + credFails.length;
+
+  return (
+    <div className="space-y-3">
+      <div className="flex items-center gap-2">
+        {isRejection
+          ? <XCircle className="w-4 h-4 text-red-400 flex-shrink-0" />
+          : <Clock className="w-4 h-4 text-amber-400 flex-shrink-0" />
+        }
+        <span className={`text-sm font-semibold ${isRejection ? "text-red-300" : "text-amber-300"}`}>
+          {isRejection ? "Rejected" : "Pending"} — {totalIssues} issue{totalIssues !== 1 ? "s" : ""} found, {passCount}/{totalChecks} checks passed
+        </span>
+      </div>
+
+      <div className="grid grid-cols-2 gap-x-4 gap-y-1.5">
+        {missingDocs.length > 0 && (
+          <div className="col-span-2">
+            <p className="text-xs font-medium text-slate-400 mb-1">Missing documents</p>
+            {missingDocs.map((r) => (
+              <p key={r.id} className="text-xs text-red-400 ml-2">✗ {r.check_name.replace("doc_", "").replace(/_/g, " ")}</p>
+            ))}
+          </div>
+        )}
+        {missingFields.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-slate-400 mb-1">Missing fields</p>
+            {missingFields.slice(0, 4).map((r) => (
+              <p key={r.id} className="text-xs text-red-400 ml-2">✗ {r.check_name.replace("field_", "").replace(/_/g, " ")}</p>
+            ))}
+            {missingFields.length > 4 && <p className="text-xs text-slate-600 ml-2">+{missingFields.length - 4} more</p>}
+          </div>
+        )}
+        {formatFails.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-slate-400 mb-1">Format failures</p>
+            {formatFails.slice(0, 4).map((r) => (
+              <p key={r.id} className="text-xs text-red-400 ml-2">✗ {r.check_name.replace(/_/g, " ")}</p>
+            ))}
+            {formatFails.length > 4 && <p className="text-xs text-slate-600 ml-2">+{formatFails.length - 4} more</p>}
+          </div>
+        )}
+        {crossDocFails.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-slate-400 mb-1">Cross-doc mismatches</p>
+            {crossDocFails.slice(0, 3).map((r) => (
+              <p key={r.id} className="text-xs text-red-400 ml-2">✗ {r.check_name.replace(/_/g, " ")}</p>
+            ))}
+            {crossDocFails.length > 3 && <p className="text-xs text-slate-600 ml-2">+{crossDocFails.length - 3} more</p>}
+          </div>
+        )}
+        {consistFails.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-slate-400 mb-1">Consistency issues</p>
+            {consistFails.slice(0, 3).map((r) => (
+              <p key={r.id} className={`text-xs ml-2 ${r.status === "mismatch" ? "text-red-400" : "text-amber-400"}`}>
+                {r.status === "mismatch" ? "✗" : "⚠"} {r.check_name.replace(/_/g, " ")}
+              </p>
+            ))}
+            {consistFails.length > 3 && <p className="text-xs text-slate-600 ml-2">+{consistFails.length - 3} more</p>}
+          </div>
+        )}
+        {credFails.length > 0 && (
+          <div>
+            <p className="text-xs font-medium text-slate-400 mb-1">Risk / credibility</p>
+            {credFails.slice(0, 3).map((r) => (
+              <p key={r.id} className="text-xs text-red-400 ml-2">✗ {r.check_name.replace(/_/g, " ")}</p>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {vendor.risk_level && vendor.risk_level !== "low" && (
+        <p className="text-xs">
+          <span className="text-slate-500">Risk level: </span>
+          <span className={vendor.risk_level === "high" ? "text-red-400 font-medium" : "text-amber-400"}>
+            {vendor.risk_level}
+          </span>
+        </p>
+      )}
+    </div>
+  );
+}
+
 function AdminEmailLog({ vendor }: { vendor: VendorDetail }) {
-  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [expandedId, setExpandedId]     = useState<string | null>(null);
+  const [showBodyId,  setShowBodyId]    = useState<string | null>(null);
   if (vendor.email_logs.length === 0) return null;
 
   const TYPE_CONFIG: Record<string, { label: string; color: string }> = {
-    ocr_failure: { label: "OCR Failure", color: "text-amber-400" },
-    pending_request: { label: "Pending Request", color: "text-orange-400" },
-    rejection_neutral: { label: "Rejection", color: "text-red-400" },
-    approval: { label: "Approval", color: "text-emerald-400" },
+    ocr_failure:       { label: "OCR Failure",      color: "text-amber-400"  },
+    pending_request:   { label: "Pending Request",   color: "text-orange-400" },
+    rejection_neutral: { label: "Rejection",         color: "text-red-400"    },
+    approval:          { label: "Approval",          color: "text-emerald-400"},
   };
 
   return (
@@ -263,9 +446,11 @@ function AdminEmailLog({ vendor }: { vendor: VendorDetail }) {
       <div className="space-y-2">
         {vendor.email_logs.map((email) => {
           const typeInfo = TYPE_CONFIG[email.email_type || ""] || { label: email.email_type || "Email", color: "text-slate-400" };
-          const isOpen = expandedId === email.id;
+          const isOpen     = expandedId === email.id;
+          const bodyOpen   = showBodyId  === email.id;
           return (
             <div key={email.id} className="rounded-xl border border-slate-700/50 bg-slate-800/30 overflow-hidden">
+              {/* Header row */}
               <button
                 onClick={() => setExpandedId(isOpen ? null : email.id)}
                 className="w-full flex items-center gap-3 p-3 text-left"
@@ -280,13 +465,39 @@ function AdminEmailLog({ vendor }: { vendor: VendorDetail }) {
                 <span className={`text-[10px] font-medium ${typeInfo.color} flex-shrink-0`}>{typeInfo.label}</span>
                 {email.success
                   ? <CheckCircle className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-                  : <XCircle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+                  : <XCircle    className="w-3.5 h-3.5 text-red-400    flex-shrink-0" />
                 }
-                {isOpen ? <ChevronUp className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />}
+                {isOpen
+                  ? <ChevronUp   className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+                  : <ChevronDown className="w-3.5 h-3.5 text-slate-500 flex-shrink-0" />
+                }
               </button>
-              {isOpen && email.body && (
-                <div className="px-3 pb-3 border-t border-slate-700/30">
-                  <pre className="text-xs text-slate-400 mt-2 whitespace-pre-wrap font-sans leading-relaxed">{email.body}</pre>
+
+              {/* Admin summary */}
+              {isOpen && (
+                <div className="px-4 pb-4 border-t border-slate-700/30 space-y-3 pt-3">
+                  <AdminSummaryContent emailType={email.email_type} vendor={vendor} />
+
+                  {/* Collapsible raw vendor email */}
+                  {email.body && (
+                    <div>
+                      <button
+                        onClick={() => setShowBodyId(bodyOpen ? null : email.id)}
+                        className="flex items-center gap-1.5 text-xs text-slate-500 hover:text-slate-400 transition-colors"
+                      >
+                        {bodyOpen
+                          ? <ChevronUp   className="w-3 h-3" />
+                          : <ChevronDown className="w-3 h-3" />
+                        }
+                        {bodyOpen ? "Hide" : "View"} email sent to vendor
+                      </button>
+                      {bodyOpen && (
+                        <pre className="mt-2 text-xs text-slate-500 whitespace-pre-wrap font-sans leading-relaxed border-t border-slate-700/30 pt-2">
+                          {email.body}
+                        </pre>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -554,8 +765,10 @@ export default function RunPage() {
     byCategory[r.category].push(r);
   }
 
-  const overallScore = computeOverallScore(byCategory);
-  const categories = ["format_check", "completeness", "cross_doc_check", "consistency", "credibility"];
+  const byCategoryDisplay = buildDisplayCategories(byCategory);
+  const docsAreMissing = (byCategoryDisplay["docs_uploaded"] ?? []).some((r) => r.status === "missing");
+  const overallScore = computeOverallScore(byCategoryDisplay);
+  const categories = ["format_check", "docs_uploaded", "completeness", "cross_doc_check", "consistency", "credibility"];
   const versionNum = vendor?.version_number || 1;
 
   return (
@@ -647,9 +860,9 @@ export default function RunPage() {
                 </div>
               </div>
             </div>
-            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
               {categories.map((cat) => (
-                <CategoryScoreCard key={cat} category={cat} results={byCategory[cat] ?? []} />
+                <CategoryScoreCard key={cat} category={cat} results={byCategoryDisplay[cat] ?? []} docsAreMissing={docsAreMissing} />
               ))}
             </div>
           </div>
@@ -729,15 +942,29 @@ export default function RunPage() {
             <DecisionBanner status={status} summary={summary} riskLevel={riskLevel} />
 
             {categories.map((cat) => {
-              const results = byCategory[cat] ?? [];
-              if (results.length === 0) return null;
+              const results = byCategoryDisplay[cat] ?? [];
               const labels: Record<string, string> = {
-                format_check: "Identity & Format Checks",
-                completeness: "Completeness Checks",
+                format_check:    "Identity & Format Checks",
+                docs_uploaded:   "Documents Uploaded",
+                completeness:    "Field Completeness Checks",
                 cross_doc_check: "Cross-Document Checks",
-                consistency: "Consistency Analysis",
-                credibility: "Credibility & Fraud Analysis",
+                consistency:     "Consistency Analysis",
+                credibility:     "Credibility & Fraud Analysis",
               };
+              if (results.length === 0) {
+                if (docsAreMissing && DOC_DEPENDENT_CATEGORIES.has(cat)) {
+                  return (
+                    <div key={cat} className="card border-slate-700/40">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-sm font-semibold text-white">{labels[cat] || cat.replace(/_/g, " ")}</span>
+                        <span className="text-xs px-2 py-0.5 rounded-full bg-slate-700/50 text-slate-500">skipped</span>
+                      </div>
+                      <p className="text-xs text-slate-600 mt-3">Not run — no documents were uploaded</p>
+                    </div>
+                  );
+                }
+                return null;
+              }
               return (
                 <ValidationSection
                   key={cat}

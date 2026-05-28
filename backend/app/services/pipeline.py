@@ -302,6 +302,8 @@ async def run_pipeline(
 
                 # Update document record
                 doc.extracted_json = extracted
+                doc.extraction_confidence = extracted.get("_extraction_confidence")
+                doc.updated_at = datetime.utcnow()
                 db.commit()
             except Exception as e:
                 logger.error(f"[{run_id}] Failed to extract {doc_type}: {e}")
@@ -354,6 +356,7 @@ async def run_pipeline(
             # Persist quality score
             if quality_score is not None:
                 doc.quality_score = quality_score
+            doc.updated_at = datetime.utcnow()
         db.commit()
 
         # Send OCR failure email if any docs failed
@@ -576,8 +579,10 @@ async def _finalize(
         db.commit()
 
     elif decision["status"] == "rejected" and contact_email:
+        rejection_reason_codes = decision.get("reasons", {}).get("reason_codes", [])
         email_body = await asyncio.get_event_loop().run_in_executor(
-            None, generate_rejection_email, vendor_name
+            None, generate_rejection_email, vendor_name,
+            rejection_reason_codes, completeness_results, consistency_results
         )
         success = send_rejection_email(contact_email, vendor_name, email_body)
 
