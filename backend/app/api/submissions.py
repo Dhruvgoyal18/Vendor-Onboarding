@@ -43,6 +43,41 @@ async def _validate_file(file: UploadFile) -> bytes:
     return content
 
 
+def _find_existing_vendor(db: Session, form_data: "SubmissionFormData", exclude_id=None) -> Optional["Vendor"]:
+    """
+    Find any existing vendor that matches on at least one strong identity signal.
+    Matches against approved, pending, and rejected statuses (not processing/error).
+    Returns the most recent match, or None.
+    """
+    from sqlalchemy import and_
+    dup_filters = [Vendor.company_name == form_data.company_name]
+    if getattr(form_data, "pan_number", None):
+        dup_filters.append(Vendor.pan_number == form_data.pan_number)
+    if getattr(form_data, "gstin_number", None):
+        dup_filters.append(Vendor.gstin_number == form_data.gstin_number)
+    if form_data.account_number and getattr(form_data, "ifsc_code", None):
+        dup_filters.append(
+            and_(Vendor.account_number == form_data.account_number,
+                 Vendor.ifsc_code == form_data.ifsc_code)
+        )
+
+    query = (
+        db.query(Vendor)
+        .filter(
+            or_(*dup_filters),
+            Vendor.status.in_([
+                SubmissionStatus.approved,
+                SubmissionStatus.pending,
+                SubmissionStatus.rejected,
+            ]),
+        )
+        .order_by(Vendor.created_at.desc())
+    )
+    if exclude_id:
+        query = query.filter(Vendor.id != exclude_id)
+    return query.first()
+
+
 @router.post("", response_model=SubmissionResponse)
 async def create_submission(
     background_tasks: BackgroundTasks,
@@ -112,7 +147,89 @@ async def create_submission(
             f.write(file_bytes)
         doc_records["pan_gstin"] = (pan_gstin_doc.filename, file_path, storage_key)
 
-    # Create vendor record
+    # ── Duplicate gate ────────────────────────────────────────────────────────────
+    existing = _find_existing_vendor(db, form_data)
+
+    if existing:
+        if existing.status == SubmissionStatus.approved:
+            # Hard block — vendor is already onboarded
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "ALREADY_APPROVED",
+                    "message": (
+                        f"{form_data.company_name} is already an approved vendor. "
+                        "Contact support if you need to update your details."
+                    ),
+                    "existing_run_id": existing.run_id,
+                },
+            )
+
+        # pending or rejected — auto-promote to a new version of the existing case
+        original_run_id = existing.original_run_id or existing.run_id
+        new_version = (existing.version_number or 1) + 1
+        new_vendor = Vendor(
+            run_id=run_id,
+            company_name=form_data.company_name,
+            registration_number=form_data.registration_number,
+            country=form_data.country,
+            incorporation_date=form_data.incorporation_date,
+            contact_name=form_data.contact_name,
+            contact_email=form_data.contact_email,
+            tax_id=form_data.tax_id,
+            tax_id_type=form_data.tax_id_type,
+            bank_account_name=form_data.bank_account_name,
+            account_number=form_data.account_number,
+            bank_name=form_data.bank_name,
+            bank_country=form_data.bank_country,
+            cin_number=form_data.cin_number,
+            pan_number=form_data.pan_number,
+            gstin_number=form_data.gstin_number,
+            ifsc_code=form_data.ifsc_code,
+            account_type=form_data.account_type,
+            registered_state=form_data.registered_state,
+            status=SubmissionStatus.processing,
+            current_stage=PipelineStage.intake,
+            version_number=new_version,
+            original_run_id=original_run_id,
+            resubmission_notes="Auto-linked: duplicate submission detected and promoted to new version.",
+        )
+        db.add(new_vendor)
+        db.commit()
+        db.refresh(new_vendor)
+
+        for doc_type, (filename, file_path, storage_key) in doc_records.items():
+            db.add(Document(
+                vendor_id=new_vendor.id,
+                document_type=doc_type,
+                original_filename=filename,
+                file_path=file_path,
+                storage_key=storage_key,
+            ))
+        for stage in PIPELINE_STAGES:
+            db.add(PipelineStageLog(
+                vendor_id=new_vendor.id,
+                stage=stage,
+                status=StageStatus.pending,
+            ))
+        db.commit()
+
+        background_tasks.add_task(_run_pipeline_sync, new_vendor.id, documents_data)
+        logger.info(
+            f"Duplicate detected — auto-versioned as v{new_version} "
+            f"(original: {existing.run_id}, new: {run_id})"
+        )
+        return SubmissionResponse(
+            run_id=run_id,
+            message=(
+                f"An existing application was found for {form_data.company_name}. "
+                f"Your submission has been linked as version {new_version}."
+            ),
+            was_auto_versioned=True,
+            existing_run_id=existing.run_id,
+        )
+
+    # No duplicate — normal new submission
     vendor = Vendor(
         run_id=run_id,
         company_name=form_data.company_name,

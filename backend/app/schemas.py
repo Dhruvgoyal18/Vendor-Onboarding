@@ -248,6 +248,8 @@ class PaginatedVendors(BaseModel):
 class SubmissionResponse(BaseModel):
     run_id: str
     message: str
+    was_auto_versioned: bool = False   # True when a duplicate was silently promoted to a new version
+    existing_run_id: Optional[str] = None  # The original run_id this was linked to
 
 
 # ─── SSE Event ─────────────────────────────────────────────────────────────────
