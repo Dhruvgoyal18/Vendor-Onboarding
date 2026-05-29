@@ -7,8 +7,8 @@ from app.prompts.templates import (
     INDIA_BANK_EXTRACTION_PROMPT,
     DOC_TYPE_CLASSIFICATION_PROMPT,
 )
-from app.services.llm_service import call_llm_json, call_anthropic_vision_json
-from app.services.ocr_service import extract_text
+from app.services.llm_service import call_llm_json, call_groq_vision_json
+from app.services.ocr_service import extract_text, render_document_to_images
 
 logger = logging.getLogger(__name__)
 
@@ -124,10 +124,16 @@ def _extract_with_vision(
     country: Optional[str],
 ) -> dict:
     """
-    Claude Vision fallback: called when OCR yields no text (e.g. Tesseract unavailable).
-    Sends the raw document bytes to Claude and extracts structured JSON directly.
+    Groq Vision fallback: called when OCR yields no text (e.g. Tesseract unavailable).
+    Renders the document to JPEG images via pypdfium2 (no poppler needed), then sends
+    them to Groq Llama 4 Scout for structured extraction.
     Document-type classification is skipped — there is no text to classify on.
     """
+    images = render_document_to_images(file_bytes, filename)
+    if not images:
+        logger.error(f"Vision fallback: could not render {filename} to images")
+        return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None, "_vision_fallback": True}
+
     country_upper = (country or "").upper()
     system_prompt = COUNTRY_DOC_PROMPTS.get(
         (country_upper, document_type),
@@ -141,17 +147,17 @@ def _extract_with_vision(
     )
 
     try:
-        raw = call_anthropic_vision_json(system_prompt, user_message, file_bytes, filename)
+        raw = call_groq_vision_json(system_prompt, user_message, images)
         if not isinstance(raw, dict):
-            logger.error(f"Vision fallback returned non-dict for {filename}")
+            logger.error(f"Groq Vision fallback returned non-dict for {filename}")
             return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None, "_vision_fallback": True}
         result = _flatten_confident_fields(raw, document_type)
         result["_ocr_confidence"] = 0.0
         result["_vision_fallback"] = True
-        logger.info(f"Vision fallback succeeded for {filename} (quality={result.get('_quality_score')})")
+        logger.info(f"Groq Vision fallback succeeded for {filename} (quality={result.get('_quality_score')})")
         return result
     except Exception as e:
-        logger.error(f"Claude Vision fallback failed for {filename}: {e}")
+        logger.error(f"Groq Vision fallback failed for {filename}: {e}")
         return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None, "_vision_fallback": True}
 
 

@@ -2,6 +2,7 @@ import io
 import logging
 from typing import Optional
 import pdfplumber
+import pypdfium2 as pdfium
 import pytesseract
 from pdf2image import convert_from_bytes
 from PIL import Image, ImageFilter, ImageEnhance
@@ -106,3 +107,42 @@ def extract_text(file_bytes: bytes, filename: str) -> tuple[str, float]:
 
     logger.warning(f"Unsupported file type for OCR: {ext}")
     return "", 0.0
+
+
+def render_document_to_images(file_bytes: bytes, filename: str, max_pages: int = 3) -> list[bytes]:
+    """
+    Render a document to a list of JPEG image bytes (one per page).
+    Uses pypdfium2 for PDFs (no poppler dependency) and PIL for images.
+    Returns up to max_pages images. Returns [] on failure.
+    """
+    ext = filename.lower().rsplit(".", 1)[-1]
+
+    if ext in ("jpg", "jpeg", "png", "webp"):
+        try:
+            img = Image.open(io.BytesIO(file_bytes)).convert("RGB")
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=90)
+            return [buf.getvalue()]
+        except Exception as e:
+            logger.error(f"Failed to read image {filename}: {e}")
+            return []
+
+    if ext == "pdf":
+        try:
+            pdf = pdfium.PdfDocument(file_bytes)
+            images = []
+            for i, page in enumerate(pdf):
+                if i >= max_pages:
+                    break
+                bitmap = page.render(scale=2.0, rotation=0)  # ~144 DPI
+                pil_img = bitmap.to_pil().convert("RGB")
+                buf = io.BytesIO()
+                pil_img.save(buf, format="JPEG", quality=90)
+                images.append(buf.getvalue())
+            return images
+        except Exception as e:
+            logger.error(f"pypdfium2 render failed for {filename}: {e}")
+            return []
+
+    logger.warning(f"render_document_to_images: unsupported type .{ext}")
+    return []
