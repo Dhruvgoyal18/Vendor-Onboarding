@@ -7,9 +7,9 @@ class Settings(BaseSettings):
     supabase_key: str
     supabase_service_key: str
     database_url: str
-    anthropic_api_key: str
+    anthropic_api_key: str = ""
     groq_api_key: str = ""
-    llm_provider: str = "anthropic"
+    llm_provider: str = "groq"
     resend_api_key: str = ""
     from_email: str = "onboarding@vendoronboarding.com"
     frontend_url: str = "http://localhost:3000"

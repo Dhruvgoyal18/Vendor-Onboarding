@@ -87,49 +87,40 @@ def call_llm_json(system: str, user_message: str, max_tokens: int = 2000) -> dic
     return _safe_json_parse(raw)
 
 
-_VISION_MEDIA_TYPES = {
-    "pdf":  "application/pdf",
-    "jpg":  "image/jpeg",
-    "jpeg": "image/jpeg",
-    "png":  "image/png",
-    "webp": "image/webp",
-}
-
-
-def call_anthropic_vision_json(
+def call_groq_vision_json(
     system: str,
     user_message: str,
-    file_bytes: bytes,
-    filename: str,
+    images: list[bytes],
     max_tokens: int = 2000,
 ) -> dict | list:
     """
-    Call Claude Vision with a document (PDF or image) + text prompt, returning parsed JSON.
-    Used as OCR fallback when Tesseract/Poppler are unavailable (e.g. Vercel serverless).
+    Call Groq Llama 4 Scout vision with one or more JPEG image bytes + text prompt.
+    Used as OCR fallback when Tesseract is unavailable (e.g. Vercel serverless).
+    Images should be JPEG bytes rendered from the document (via pypdfium2 or PIL).
     """
-    if not anthropic_client:
-        raise ValueError("Anthropic API key is not configured — cannot use vision fallback.")
+    if not groq_client:
+        raise ValueError("Groq API key is not configured — cannot use vision fallback.")
 
-    ext = filename.lower().rsplit(".", 1)[-1]
-    media_type = _VISION_MEDIA_TYPES.get(ext)
-    if not media_type:
-        raise ValueError(f"Unsupported file type for vision fallback: .{ext}")
+    image_blocks = [
+        {
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{base64.standard_b64encode(img).decode()}"},
+        }
+        for img in images
+    ]
 
-    b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
-    doc_block = (
-        {"type": "document", "source": {"type": "base64", "media_type": media_type, "data": b64}}
-        if media_type == "application/pdf"
-        else {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+    system_with_json = (
+        f"{system}\n\n"
+        "IMPORTANT: You must return ONLY valid JSON without any markdown formatting or explanations."
     )
 
-    system_with_json = f"{system}\n\nIMPORTANT: You must return ONLY valid JSON without any markdown formatting or explanations."
-    resp = anthropic_client.messages.create(
-        model="claude-sonnet-4-20250514",
+    resp = groq_client.chat.completions.create(
+        model="meta-llama/llama-4-scout-17b-16e-instruct",
+        messages=[
+            {"role": "system", "content": system_with_json},
+            {"role": "user", "content": [*image_blocks, {"type": "text", "text": user_message}]},
+        ],
         max_tokens=max_tokens,
-        system=system_with_json,
-        messages=[{
-            "role": "user",
-            "content": [doc_block, {"type": "text", "text": user_message}],
-        }],
+        temperature=0.1,
     )
-    return _safe_json_parse(resp.content[0].text)
+    return _safe_json_parse(resp.choices[0].message.content or "")
