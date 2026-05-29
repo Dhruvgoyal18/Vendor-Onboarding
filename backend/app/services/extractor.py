@@ -7,7 +7,7 @@ from app.prompts.templates import (
     INDIA_BANK_EXTRACTION_PROMPT,
     DOC_TYPE_CLASSIFICATION_PROMPT,
 )
-from app.services.llm_service import call_llm_json
+from app.services.llm_service import call_llm_json, call_anthropic_vision_json
 from app.services.ocr_service import extract_text
 
 logger = logging.getLogger(__name__)
@@ -117,6 +117,44 @@ def _flatten_confident_fields(raw: dict, doc_type: str) -> dict:
     return flat
 
 
+def _extract_with_vision(
+    file_bytes: bytes,
+    filename: str,
+    document_type: str,
+    country: Optional[str],
+) -> dict:
+    """
+    Claude Vision fallback: called when OCR yields no text (e.g. Tesseract unavailable).
+    Sends the raw document bytes to Claude and extracts structured JSON directly.
+    Document-type classification is skipped — there is no text to classify on.
+    """
+    country_upper = (country or "").upper()
+    system_prompt = COUNTRY_DOC_PROMPTS.get(
+        (country_upper, document_type),
+        DOCUMENT_EXTRACTION_PROMPT,
+    )
+    type_hint = GENERIC_TYPE_HINTS.get(document_type, "This is a business document.")
+    user_message = (
+        f"{type_hint}\n\n"
+        "Extract all required fields from the document shown. "
+        "Return a JSON object with each field and its confidence score."
+    )
+
+    try:
+        raw = call_anthropic_vision_json(system_prompt, user_message, file_bytes, filename)
+        if not isinstance(raw, dict):
+            logger.error(f"Vision fallback returned non-dict for {filename}")
+            return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None, "_vision_fallback": True}
+        result = _flatten_confident_fields(raw, document_type)
+        result["_ocr_confidence"] = 0.0
+        result["_vision_fallback"] = True
+        logger.info(f"Vision fallback succeeded for {filename} (quality={result.get('_quality_score')})")
+        return result
+    except Exception as e:
+        logger.error(f"Claude Vision fallback failed for {filename}: {e}")
+        return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None, "_vision_fallback": True}
+
+
 def extract_document(
     file_bytes: bytes,
     filename: str,
@@ -135,8 +173,8 @@ def extract_document(
     text, ocr_confidence = extract_text(file_bytes, filename)
 
     if not text.strip():
-        logger.warning(f"No text could be extracted from {filename}")
-        return {"_quality_score": 0.0, "_low_confidence_fields": [], "_ocr_confidence": 0.0, "_extraction_confidence": None}
+        logger.warning(f"OCR returned no text for {filename} — trying Claude Vision fallback")
+        return _extract_with_vision(file_bytes, filename, document_type, country)
 
     country_upper = (country or "").upper()
 

@@ -1,3 +1,4 @@
+import base64
 import json
 import logging
 from typing import Optional, Union
@@ -84,3 +85,51 @@ def call_llm_json(system: str, user_message: str, max_tokens: int = 2000) -> dic
     system_json_instruction = f"{system}\n\nIMPORTANT: You must return ONLY valid JSON without any markdown formatting or explanations."
     raw = call_llm(system_json_instruction, user_message, max_tokens)
     return _safe_json_parse(raw)
+
+
+_VISION_MEDIA_TYPES = {
+    "pdf":  "application/pdf",
+    "jpg":  "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png":  "image/png",
+    "webp": "image/webp",
+}
+
+
+def call_anthropic_vision_json(
+    system: str,
+    user_message: str,
+    file_bytes: bytes,
+    filename: str,
+    max_tokens: int = 2000,
+) -> dict | list:
+    """
+    Call Claude Vision with a document (PDF or image) + text prompt, returning parsed JSON.
+    Used as OCR fallback when Tesseract/Poppler are unavailable (e.g. Vercel serverless).
+    """
+    if not anthropic_client:
+        raise ValueError("Anthropic API key is not configured — cannot use vision fallback.")
+
+    ext = filename.lower().rsplit(".", 1)[-1]
+    media_type = _VISION_MEDIA_TYPES.get(ext)
+    if not media_type:
+        raise ValueError(f"Unsupported file type for vision fallback: .{ext}")
+
+    b64 = base64.standard_b64encode(file_bytes).decode("utf-8")
+    doc_block = (
+        {"type": "document", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+        if media_type == "application/pdf"
+        else {"type": "image", "source": {"type": "base64", "media_type": media_type, "data": b64}}
+    )
+
+    system_with_json = f"{system}\n\nIMPORTANT: You must return ONLY valid JSON without any markdown formatting or explanations."
+    resp = anthropic_client.messages.create(
+        model="claude-sonnet-4-20250514",
+        max_tokens=max_tokens,
+        system=system_with_json,
+        messages=[{
+            "role": "user",
+            "content": [doc_block, {"type": "text", "text": user_message}],
+        }],
+    )
+    return _safe_json_parse(resp.content[0].text)
