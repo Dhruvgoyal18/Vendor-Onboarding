@@ -174,20 +174,21 @@ async def run_pipeline(
         _update_stage(db, vendor, PipelineStage.intake, StageStatus.running, "Receiving submission")
         await asyncio.sleep(0.5)
 
-        # Duplicate detection — company name, PAN, GSTIN, account+IFSC
+        # Duplicate detection — catch race conditions where two submissions
+        # for the same vendor landed within milliseconds of each other.
+        # The primary gate (block approved, auto-version pending/rejected)
+        # is enforced at the API level before any DB rows are created.
+        from sqlalchemy import and_, or_
         dup_filters = [Vendor.company_name == vendor.company_name]
         if vendor.pan_number:
             dup_filters.append(Vendor.pan_number == vendor.pan_number)
         if vendor.gstin_number:
             dup_filters.append(Vendor.gstin_number == vendor.gstin_number)
         if vendor.account_number and vendor.ifsc_code:
-            from sqlalchemy import and_
             dup_filters.append(
                 and_(Vendor.account_number == vendor.account_number,
                      Vendor.ifsc_code == vendor.ifsc_code)
             )
-
-        from sqlalchemy import or_
         existing = (
             db.query(Vendor)
             .filter(
@@ -197,7 +198,7 @@ async def run_pipeline(
             )
             .first()
         )
-        if existing:
+        if existing and not vendor.is_duplicate:
             vendor.is_duplicate = True
             vendor.duplicate_of_run_id = existing.run_id
             db.commit()

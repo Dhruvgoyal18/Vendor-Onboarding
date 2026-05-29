@@ -2,7 +2,7 @@
 
 import { useState, useRef, useCallback, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { createSubmission, resubmitVendor, getSubmission } from "@/lib/api";
+import { createSubmission, resubmitVendor, getSubmission, AlreadyApprovedError } from "@/lib/api";
 import { SubmissionFormData, COUNTRY_TAX_DEFAULTS, INDIA_STATES } from "@/lib/types";
 import {
   validateCIN,
@@ -223,6 +223,7 @@ export default function SubmissionForm() {
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  const [blockedRunId, setBlockedRunId] = useState<string | null>(null);
   const [errors, setErrors] = useState<Partial<Record<string, string>>>({});
   const [resubmitNotes, setResubmitNotes] = useState("");
   const [isLoadingPrefill, setIsLoadingPrefill] = useState(!!resubmitRunId);
@@ -353,6 +354,7 @@ export default function SubmissionForm() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitError(null);
+    setBlockedRunId(null);
     if (!validate()) {
       setSubmitError("Please fix the errors above before submitting.");
       return;
@@ -364,7 +366,11 @@ export default function SubmissionForm() {
         : await createSubmission(form, files);
       router.push(`/vendor/${result.run_id}`);
     } catch (err) {
-      setSubmitError(err instanceof Error ? err.message : "Submission failed. Please try again.");
+      if (err instanceof AlreadyApprovedError) {
+        setBlockedRunId(err.existingRunId);
+      } else {
+        setSubmitError(err instanceof Error ? err.message : "Submission failed. Please try again.");
+      }
       setIsSubmitting(false);
     }
   };
@@ -893,6 +899,27 @@ export default function SubmissionForm() {
         </div>
       </div>
 
+      {/* Already-approved block */}
+      {blockedRunId && (
+        <div className="p-4 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 space-y-2">
+          <div className="flex items-start gap-3">
+            <ShieldCheck className="w-4 h-4 mt-0.5 flex-shrink-0" />
+            <div>
+              <p className="text-sm font-medium">This company is already an approved vendor.</p>
+              <p className="text-xs text-emerald-400/70 mt-0.5">
+                A submission with matching details has been approved. No new application is needed.
+              </p>
+            </div>
+          </div>
+          <a
+            href={`/vendor/${blockedRunId}`}
+            className="inline-flex items-center gap-1.5 text-xs text-emerald-400 hover:text-emerald-300 underline underline-offset-2 transition-colors"
+          >
+            View existing submission →
+          </a>
+        </div>
+      )}
+
       {/* Submit error */}
       {(submitError || errors.documents) && (
         <div className="flex items-start gap-3 p-4 rounded-xl bg-red-500/10 border border-red-500/30 text-red-300">
@@ -904,7 +931,7 @@ export default function SubmissionForm() {
       {/* Submit */}
       <button
         type="submit"
-        disabled={isSubmitting}
+        disabled={isSubmitting || !!blockedRunId}
         className="w-full py-3.5 px-6 bg-violet-600 hover:bg-violet-500 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all duration-200 shadow-lg shadow-violet-500/20 hover:shadow-violet-500/30 flex items-center justify-center gap-2 text-sm"
       >
         {isSubmitting ? (

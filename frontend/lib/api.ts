@@ -60,6 +60,24 @@ export async function apiRequest<T>(
   return response.json();
 }
 
+// ─── Submission result type ───────────────────────────────────────────────────
+
+export interface SubmissionResult {
+  run_id: string;
+  message: string;
+  was_auto_versioned: boolean;
+  existing_run_id: string | null;
+}
+
+export class AlreadyApprovedError extends Error {
+  existingRunId: string;
+  constructor(message: string, existingRunId: string) {
+    super(message);
+    this.name = "AlreadyApprovedError";
+    this.existingRunId = existingRunId;
+  }
+}
+
 // ─── Submissions ──────────────────────────────────────────────────────────────
 
 export async function createSubmission(
@@ -70,7 +88,7 @@ export async function createSubmission(
     tax?: File | null;
     pan_gstin?: File | null;
   }
-): Promise<{ run_id: string; message: string }> {
+): Promise<SubmissionResult> {
   const fd = new FormData();
   fd.append("data", JSON.stringify(formData));
   if (files.registration) fd.append("registration_doc", files.registration);
@@ -82,9 +100,15 @@ export async function createSubmission(
     method: "POST",
     body: fd,
   });
+
   if (!response.ok) {
     const error = await response.json().catch(() => ({ detail: "Submission failed" }));
-    throw new Error(error.detail || `HTTP ${response.status}`);
+    if (response.status === 409 && error.detail?.code === "ALREADY_APPROVED") {
+      throw new AlreadyApprovedError(error.detail.message, error.detail.existing_run_id);
+    }
+    throw new Error(
+      typeof error.detail === "string" ? error.detail : "Submission failed"
+    );
   }
   return response.json();
 }
